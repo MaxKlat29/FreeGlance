@@ -17,14 +17,36 @@ struct CalibrationSample: Codable, Sendable {
 struct Calibration: Codable, Sendable {
     static let defaultsKey = "calibration"
     /// Bumped when `GazeFeatures` semantics change; older calibrations then need recalibration.
-    static let featureVersion = 2
+    /// 3: dense smooth-pursuit samples with latency compensation and cross-validated ridge strength.
+    static let featureVersion = 3
+    /// Fixation radius for calibrations that predate the measured one.
+    static let defaultNoiseRadius = 70.0
 
     var samples: [CalibrationSample]
     var displayLayoutHash: String
+    /// Ridge strength chosen by cross-validation; also used when clicks refit the model.
+    var lambda: Double
+    /// Typical per-frame model error in points, the fixation filter's radius.
+    var noiseRadius: Double
+    /// Median cross-validated error on the largest display, nil when its physical size is unknown.
+    var typicalErrorCm: Double?
 
-    init(samples: [CalibrationSample], displays: [DisplayInfo]) {
+    init(samples: [CalibrationSample], displays: [DisplayInfo], lambda: Double = GazeModel.regularization,
+         noiseRadius: Double = Calibration.defaultNoiseRadius, typicalErrorCm: Double? = nil) {
         self.samples = samples
         self.displayLayoutHash = Self.currentLayoutHash(displays: displays)
+        self.lambda = lambda
+        self.noiseRadius = noiseRadius
+        self.typicalErrorCm = typicalErrorCm
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        samples = try c.decode([CalibrationSample].self, forKey: .samples)
+        displayLayoutHash = try c.decode(String.self, forKey: .displayLayoutHash)
+        lambda = try c.decodeIfPresent(Double.self, forKey: .lambda) ?? GazeModel.regularization
+        noiseRadius = try c.decodeIfPresent(Double.self, forKey: .noiseRadius) ?? Self.defaultNoiseRadius
+        typicalErrorCm = try c.decodeIfPresent(Double.self, forKey: .typicalErrorCm)
     }
 
     static func currentLayoutHash(displays: [DisplayInfo]) -> String {
@@ -36,6 +58,13 @@ struct Calibration: Codable, Sendable {
             }
             .joined(separator: "|")
         return SHA256.hash(data: Data(layout.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Weight of one learnt click: a full buffer of `bufferSize` clicks carries `share` of the combined
+    /// weight, however many pursuit frames the calibration holds.
+    func clickWeight(bufferSize: Int, share: Double) -> Double {
+        let screenWeight = samples.filter { !$0.isAway }.reduce(0) { $0 + $1.weight }
+        return share / (1 - share) * screenWeight / Double(bufferSize)
     }
 
     func matches(displays: [DisplayInfo]) -> Bool {

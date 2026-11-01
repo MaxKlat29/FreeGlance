@@ -132,7 +132,7 @@ struct WelcomeView: View {
         StepPage(
             symbol: "scope",
             title: "Calibrate",
-            text: "A dot moves across all your displays. Look at it the way you normally would, head and eyes. Takes about half a minute per display.",
+            text: "A ball slowly travels across each display. Follow it once with head and eyes, once with your eyes only, then look at your keyboard. Takes about half a minute per display.",
             granted: !appState.displays.isEmpty && !appState.needsRecalibration
                 && appState.displays.allSatisfy { appState.calibratedDisplayIDs.contains($0.id) }
         ) {

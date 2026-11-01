@@ -96,4 +96,28 @@ final class GazeModelTests: XCTestCase {
         XCTAssertEqual(p.x, 250, accuracy: 1e-6)
         XCTAssertEqual(p.y, 50, accuracy: 1e-6)
     }
+
+    func testFullClickBufferShiftsRefitTowardsClickOffset() throws {
+        var rng = LCG(state: 11)
+        let pursuit = (0..<2000).map { _ -> CalibrationSample in
+            let f = features(&rng)
+            return CalibrationSample(features: f, point: fullTruth(f), displayID: 1, weight: 1)
+        }
+        let calibration = Calibration(samples: pursuit, displays: [])
+        let weight = calibration.clickWeight(bufferSize: 300, share: 0.2)
+        let offset = 100.0
+        let clicks = (0..<300).map { _ -> CalibrationSample in
+            let f = features(&rng)
+            let truth = fullTruth(f)
+            return CalibrationSample(features: f, point: CGPoint(x: truth.x + offset, y: truth.y), displayID: 1, weight: weight)
+        }
+        let before = try XCTUnwrap(GazeModel(samples: pursuit))
+        let after = try XCTUnwrap(GazeModel(samples: pursuit + clicks))
+        let shifts = (0..<50).map { _ -> Double in
+            let f = features(&rng)
+            return Double(after.predictPoint(f).x - before.predictPoint(f).x)
+        }
+        let mean = shifts.reduce(0, +) / Double(shifts.count)
+        XCTAssertEqual(mean, 0.2 * offset, accuracy: 0.05 * offset)
+    }
 }

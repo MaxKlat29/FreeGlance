@@ -191,7 +191,10 @@ private struct CalibrateTab: View {
                 }
             }
             Section {
-                Text("Look at each dot the way you normally would, then at your keyboard. Takes about half a minute per display.")
+                if let error = appState.calibrationErrorCm, !appState.needsRecalibration {
+                    LabeledContent("Typical error", value: String(format: "≈ %.1f cm", error))
+                }
+                Text("Follow a slowly moving ball across each screen, once with head and eyes and once with your eyes only, then look at your keyboard. Takes about half a minute per display.")
                     .foregroundStyle(.secondary)
                 Button("Calibrate") { appState.startCalibration() }
                     .buttonStyle(.borderedProminent)

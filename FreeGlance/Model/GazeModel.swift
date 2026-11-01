@@ -3,20 +3,19 @@ import Foundation
 
 struct GazeModel: Sendable {
     static let minimumSamples = 6
-    // Measured on real calibration data (leave-one-spot-out): the full model needs strong
-    // regularization to keep its tail error down.
+    /// Ridge strength for calibrations from before `CalibrationFit` chose it by cross-validation.
     static let regularization = 0.03
 
     private let full: RidgeRegression
 
-    init?(samples: [CalibrationSample]) {
+    init?(samples: [CalibrationSample], lambda: Double = GazeModel.regularization) {
         let usable = samples.filter { s in
             !s.isAway && s.weight > 0 && s.weight.isFinite && s.point.x.isFinite && s.point.y.isFinite
                 && s.features.fullVector.allSatisfy(\.isFinite)
         }
         guard usable.count >= Self.minimumSamples,
               let full = RidgeRegression(inputs: usable.map(\.features.fullVector), targets: usable.map(\.point),
-                                         weights: usable.map(\.weight), lambda: Self.regularization, quadratic: true)
+                                         weights: usable.map(\.weight), lambda: lambda, quadratic: true)
         else { return nil }
         self.full = full
     }
@@ -26,21 +25,22 @@ struct GazeModel: Sendable {
     }
 }
 
-struct RidgeRegression: Sendable {
+/// Standardized (optionally quadratic) design and its weighted Gram matrix, built once and then
+/// solved for any targets and ridge strength. Cross-validation reuses one per fold for every
+/// latency and lambda candidate.
+struct RidgeProblem: Sendable {
     private let inputMean: [Double]
     private let inputScale: [Double]
     private let featureMean: [Double]
     private let featureScale: [Double]
-    private let coefficientsX: [Double]
-    private let coefficientsY: [Double]
-    private let interceptX: Double
-    private let interceptY: Double
+    private let design: [[Double]]
+    private let weights: [Double]
+    private let totalWeight: Double
+    private let gram: [Double]
     private let quadratic: Bool
 
-    init?(inputs: [[Double]], targets: [CGPoint], weights: [Double], lambda: Double, quadratic: Bool) {
-        self.quadratic = quadratic
-        guard let width = inputs.first?.count, width > 0,
-              inputs.count == targets.count, inputs.count == weights.count,
+    init?(inputs: [[Double]], weights: [Double], quadratic: Bool) {
+        guard let width = inputs.first?.count, width > 0, inputs.count == weights.count,
               inputs.allSatisfy({ $0.count == width })
         else { return nil }
         let totalWeight = weights.reduce(0, +)
@@ -51,56 +51,61 @@ struct RidgeRegression: Sendable {
         let feature = LinearAlgebra.standardization(of: expanded, weights: weights, total: totalWeight)
         let design = expanded.map { Self.apply($0, mean: feature.mean, scale: feature.scale) }
 
-        let meanX = zip(targets, weights).reduce(0) { $0 + Double($1.0.x) * $1.1 } / totalWeight
-        let meanY = zip(targets, weights).reduce(0) { $0 + Double($1.0.y) * $1.1 } / totalWeight
-
         let n = design[0].count
         var gram = [Double](repeating: 0, count: n * n)
-        var rhsX = [Double](repeating: 0, count: n)
-        var rhsY = [Double](repeating: 0, count: n)
-        for (row, (target, w)) in zip(design, zip(targets, weights)) {
-            let dx = Double(target.x) - meanX
-            let dy = Double(target.y) - meanY
+        for (row, w) in zip(design, weights) {
             for i in 0..<n {
                 let wi = w * row[i]
-                rhsX[i] += wi * dx
-                rhsY[i] += wi * dy
                 for j in i..<n {
                     gram[i * n + j] += wi * row[j]
                 }
             }
         }
-        let ridge = lambda * totalWeight
         for i in 0..<n {
-            gram[i * n + i] += ridge
             for j in 0..<i {
                 gram[i * n + j] = gram[j * n + i]
             }
         }
-        guard let factor = LinearAlgebra.cholesky(gram, n: n) else { return nil }
-        coefficientsX = LinearAlgebra.solve(factor, n: n, rhs: rhsX)
-        coefficientsY = LinearAlgebra.solve(factor, n: n, rhs: rhsY)
-        interceptX = meanX
-        interceptY = meanY
-        inputMean = input.mean
-        inputScale = input.scale
-        featureMean = feature.mean
-        featureScale = feature.scale
+        self.inputMean = input.mean
+        self.inputScale = input.scale
+        self.featureMean = feature.mean
+        self.featureScale = feature.scale
+        self.design = design
+        self.weights = weights
+        self.totalWeight = totalWeight
+        self.gram = gram
+        self.quadratic = quadratic
     }
 
-    func predict(_ input: [Double]) -> CGPoint {
-        let row = Self.apply(Self.expand(Self.apply(input, mean: inputMean, scale: inputScale), quadratic: quadratic),
-                             mean: featureMean, scale: featureScale)
-        var x = interceptX
-        var y = interceptY
-        for i in row.indices {
-            x += coefficientsX[i] * row[i]
-            y += coefficientsY[i] * row[i]
+    /// `targets` in the order of the inputs; nil when the system is singular.
+    func solve(targets: [CGPoint], lambda: Double) -> RidgeRegression? {
+        guard targets.count == design.count else { return nil }
+        let meanX = zip(targets, weights).reduce(0) { $0 + Double($1.0.x) * $1.1 } / totalWeight
+        let meanY = zip(targets, weights).reduce(0) { $0 + Double($1.0.y) * $1.1 } / totalWeight
+
+        let n = design[0].count
+        var rhsX = [Double](repeating: 0, count: n)
+        var rhsY = [Double](repeating: 0, count: n)
+        for (row, (target, w)) in zip(design, zip(targets, weights)) {
+            let dx = w * (Double(target.x) - meanX)
+            let dy = w * (Double(target.y) - meanY)
+            for i in 0..<n {
+                rhsX[i] += row[i] * dx
+                rhsY[i] += row[i] * dy
+            }
         }
-        return CGPoint(x: x, y: y)
+        var regularized = gram
+        let ridge = lambda * totalWeight
+        for i in 0..<n { regularized[i * n + i] += ridge }
+        guard let factor = LinearAlgebra.cholesky(regularized, n: n) else { return nil }
+        return RidgeRegression(inputMean: inputMean, inputScale: inputScale, featureMean: featureMean,
+                               featureScale: featureScale,
+                               coefficientsX: LinearAlgebra.solve(factor, n: n, rhs: rhsX),
+                               coefficientsY: LinearAlgebra.solve(factor, n: n, rhs: rhsY),
+                               interceptX: meanX, interceptY: meanY, quadratic: quadratic)
     }
 
-    private static func expand(_ z: [Double], quadratic: Bool) -> [Double] {
+    fileprivate static func expand(_ z: [Double], quadratic: Bool) -> [Double] {
         guard quadratic else { return z }
         var out = z
         out.reserveCapacity(z.count + z.count * (z.count + 1) / 2)
@@ -112,8 +117,54 @@ struct RidgeRegression: Sendable {
         return out
     }
 
-    private static func apply(_ v: [Double], mean: [Double], scale: [Double]) -> [Double] {
+    fileprivate static func apply(_ v: [Double], mean: [Double], scale: [Double]) -> [Double] {
         v.indices.map { (v[$0] - mean[$0]) / scale[$0] }
+    }
+}
+
+struct RidgeRegression: Sendable {
+    fileprivate let inputMean: [Double]
+    fileprivate let inputScale: [Double]
+    fileprivate let featureMean: [Double]
+    fileprivate let featureScale: [Double]
+    fileprivate let coefficientsX: [Double]
+    fileprivate let coefficientsY: [Double]
+    fileprivate let interceptX: Double
+    fileprivate let interceptY: Double
+    fileprivate let quadratic: Bool
+
+    init?(inputs: [[Double]], targets: [CGPoint], weights: [Double], lambda: Double, quadratic: Bool) {
+        guard inputs.count == targets.count,
+              let fit = RidgeProblem(inputs: inputs, weights: weights, quadratic: quadratic)?.solve(targets: targets, lambda: lambda)
+        else { return nil }
+        self = fit
+    }
+
+    fileprivate init(inputMean: [Double], inputScale: [Double], featureMean: [Double], featureScale: [Double],
+                     coefficientsX: [Double], coefficientsY: [Double], interceptX: Double, interceptY: Double,
+                     quadratic: Bool) {
+        self.inputMean = inputMean
+        self.inputScale = inputScale
+        self.featureMean = featureMean
+        self.featureScale = featureScale
+        self.coefficientsX = coefficientsX
+        self.coefficientsY = coefficientsY
+        self.interceptX = interceptX
+        self.interceptY = interceptY
+        self.quadratic = quadratic
+    }
+
+    func predict(_ input: [Double]) -> CGPoint {
+        let row = RidgeProblem.apply(RidgeProblem.expand(RidgeProblem.apply(input, mean: inputMean, scale: inputScale),
+                                                         quadratic: quadratic),
+                                     mean: featureMean, scale: featureScale)
+        var x = interceptX
+        var y = interceptY
+        for i in row.indices {
+            x += coefficientsX[i] * row[i]
+            y += coefficientsY[i] * row[i]
+        }
+        return CGPoint(x: x, y: y)
     }
 }
 

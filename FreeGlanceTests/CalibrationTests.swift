@@ -39,19 +39,27 @@ final class CalibrationTests: XCTestCase {
         XCTAssertTrue(loaded.matches(displays: [b, a]))
     }
 
-    @MainActor
-    func testSpotsEndWithEyesOnlyPassPerDisplay() {
-        let spots = CalibrationController.makeSpots(for: [a, b])
-        let firstEyesOnly = spots.firstIndex(where: \.eyesOnly) ?? spots.count
-        XCTAssertFalse(spots[..<firstEyesOnly].isEmpty)
-        XCTAssertTrue(spots[firstEyesOnly...].allSatisfy(\.eyesOnly), "eyes-only pass runs after the head-and-eyes spots")
+    func testRoundTripKeepsFitResults() throws {
+        let f = GazeFeatures(yaw: 1, pitch: 2, roll: 3, eyeX: 0.1, eyeY: -0.2, faceX: 0.5, faceY: 0.4,
+                             faceSize: 0.2, timestamp: 10)
+        let calibration = Calibration(samples: [CalibrationSample(features: f, point: CGPoint(x: 5, y: 6), displayID: 1, weight: 1)],
+                                      displays: [a], lambda: 0.1, noiseRadius: 55, typicalErrorCm: 1.4)
+        let loaded = try JSONDecoder().decode(Calibration.self, from: JSONEncoder().encode(calibration))
+        XCTAssertEqual(loaded.lambda, 0.1)
+        XCTAssertEqual(loaded.noiseRadius, 55)
+        XCTAssertEqual(loaded.typicalErrorCm, 1.4)
+        XCTAssertTrue(loaded.matches(displays: [a]))
+    }
 
-        for display in [a, b] {
-            let eyesOnly = spots.filter { $0.eyesOnly && $0.displayID == display.id }
-            XCTAssertEqual(eyesOnly.count, 5)
-            XCTAssertEqual(eyesOnly.first?.point, CGPoint(x: display.frame.midX, y: display.frame.midY))
-            XCTAssertTrue(eyesOnly.allSatisfy { display.frame.contains($0.point) })
-            XCTAssertEqual(Set(eyesOnly.map(\.point.x)).count, 3)
-        }
+    func testDecodesCalibrationWithoutFitResults() throws {
+        let json = """
+        {"samples":[{"features":{"yaw":1,"pitch":2,"roll":3,"eyeX":0.1,"eyeY":-0.2,"faceX":0.5,"faceY":0.4,
+        "faceSize":0.2,"timestamp":10},"point":[5,6],"displayID":1,"weight":1}],"displayLayoutHash":"old"}
+        """
+        let loaded = try JSONDecoder().decode(Calibration.self, from: Data(json.utf8))
+        XCTAssertEqual(loaded.samples.count, 1)
+        XCTAssertEqual(loaded.lambda, GazeModel.regularization)
+        XCTAssertEqual(loaded.noiseRadius, Calibration.defaultNoiseRadius)
+        XCTAssertNil(loaded.typicalErrorCm)
     }
 }

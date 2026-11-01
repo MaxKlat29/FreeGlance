@@ -1,25 +1,43 @@
 import AppKit
 
+/// Smooth-pursuit calibration: per display a ball slowly traverses the whole screen, once followed
+/// with head and eyes, once with the eyes only. Every face frame is recorded against the ball's
+/// trajectory; `CalibrationFit` then picks eye latency and ridge strength. A keyboard pose ends it.
 @MainActor
 final class CalibrationController {
-    struct Spot: Equatable {
-        var point: CGPoint
-        var displayID: CGDirectDisplayID
-        /// Head held still, only the eyes follow: decorrelates eye from head features.
-        var eyesOnly = false
+    enum Outcome {
+        case cancelled
+        /// Too little usable face data, or a display without samples.
+        case failed
+        case calibrated(Calibration)
     }
 
-    private static let moveDuration: TimeInterval = 0.45
-    private static let holdDuration: TimeInterval = 1.5
-    private static let eyesOnlyHoldDuration: TimeInterval = 1.2
-    private static let eyesOnlyPrompt = "Face the centre of this screen, then keep your head still and follow the dot with your eyes only."
-    private static let eyesOnlyReadDuration: TimeInterval = 2
-    private static let discardDuration: TimeInterval = 0.4
+    enum Pass: CaseIterable {
+        case headAndEyes
+        /// Head held still, only the eyes follow: decorrelates eye from head features.
+        case eyesOnly
+
+        var rows: Int { self == .headAndEyes ? 4 : 3 }
+
+        var prompt: String {
+            switch self {
+            case .headAndEyes: "Follow the ball with your head and eyes, as you naturally would."
+            case .eyesOnly: "Face the centre of this screen, keep your head still and follow the ball with your eyes only."
+            }
+        }
+    }
+
+    private static let readDuration: TimeInterval = 2
+    /// Ball speed on screen, millimetres per second; `fallbackSpeed` points per second when the size is unknown.
+    private static let ballSpeedMM = 110.0
+    private static let fallbackSpeed = 300.0
+    private static let resultDuration: TimeInterval = 3
     private static let keyboardPrompt = "Now look at your keyboard the way you do while typing. Hold for 3 seconds."
     private static let keyboardReadDuration: TimeInterval = 1.5
     private static let keyboardHoldSeconds = 3
     private static let keyboardDiscardDuration: TimeInterval = 0.5
-    private static let dotDiameter: CGFloat = 28
+    private static let ballDiameter: CGFloat = 26
+    private static let centreDiameter: CGFloat = 6
 
     private final class OverlayWindow: NSWindow {
         var onKeyDown: ((UInt16) -> Void)?
@@ -28,157 +46,197 @@ final class CalibrationController {
         override func keyDown(with event: NSEvent) { onKeyDown?(event.keyCode) }
     }
 
+    /// Display link target: moves the ball once per screen refresh (the link runs on the main run loop).
+    @MainActor
+    private final class Ticker: NSObject {
+        let tick: () -> Void
+        init(_ tick: @escaping () -> Void) { self.tick = tick }
+        @objc func step(_ link: CADisplayLink) { tick() }
+    }
+
     private struct Overlay {
-        let displayID: CGDirectDisplayID
-        let frame: CGRect
+        let display: DisplayInfo
         let window: OverlayWindow
-        let dot: CALayer
+        let ball: CALayer
         let label: NSTextField
     }
 
     private var overlays: [Overlay] = []
-    private var spots: [Spot] = []
-    private var samples: [CalibrationSample] = []
-    private var heldSpot: Spot?
+    private var traces: [PursuitTrace] = []
+    private var activeTrace: PursuitTrace?
+    private var displayLink: CADisplayLink?
+    private var keyboardSamples: [CalibrationSample] = []
+    private var collectingKeyboard = false
     private var collectFrom: TimeInterval = 0
     private var runTask: Task<Void, Never>?
-    private var completion: (([CalibrationSample]?) -> Void)?
+    private var fitTask: Task<CalibrationFit?, Never>?
+    /// Set while the result shows; Esc then only closes it early instead of discarding the calibration.
+    private var pendingOutcome: Outcome?
+    private var completion: ((Outcome) -> Void)?
 
     private(set) var isRunning = false
 
-    /// Shows the overlay and waits for Space. Completion receives the samples, or nil when cancelled.
-    func start(completion: @escaping ([CalibrationSample]?) -> Void) {
+    /// Shows the overlay and waits for Space.
+    func start(completion: @escaping (Outcome) -> Void) {
         guard !isRunning else { return }
-        let screens = NSScreen.screens.compactMap { screen in screenID(screen).map { (id: $0, frame: screen.frame) } }
-        guard !screens.isEmpty else {
-            completion(nil)
+        let displays = NSScreen.screens.compactMap { screen in
+            screenID(screen).map { DisplayInfo(id: $0, frame: screen.frame, name: screen.localizedName) }
+        }
+        guard !displays.isEmpty else {
+            completion(.cancelled)
             return
         }
         isRunning = true
         self.completion = completion
-        samples = []
-        heldSpot = nil
-        spots = Self.makeSpots(for: screens.map { DisplayInfo(id: $0.id, frame: $0.frame, name: "") })
-        overlays = screens.map { makeOverlay(displayID: $0.id, frame: $0.frame) }
+        traces = []
+        keyboardSamples = []
+        overlays = displays.map(makeOverlay)
 
         NSApp.activate()
         for overlay in overlays { overlay.window.orderFrontRegardless() }
-        let main = overlays.first { $0.frame == NSScreen.main?.frame } ?? overlays[0]
+        let main = overlays.first { $0.display.frame == NSScreen.main?.frame } ?? overlays[0]
         main.window.makeKey()
     }
 
     func feed(_ features: GazeFeatures) {
-        guard let heldSpot, now() >= collectFrom else { return }
-        samples.append(CalibrationSample(features: features, point: heldSpot.point, displayID: heldSpot.displayID, weight: 1))
+        activeTrace?.record(features)
+        if collectingKeyboard, now() >= collectFrom {
+            keyboardSamples.append(CalibrationSample(features: features, point: .zero,
+                                                     displayID: CalibrationSample.awayDisplayID, weight: 1))
+        }
     }
 
     func cancel() {
         guard isRunning else { return }
-        finish(with: nil)
-    }
-
-    static func makeSpots(for displays: [DisplayInfo]) -> [Spot] {
-        let fractions: [CGFloat] = [0.1, 0.5, 0.9]
-        let edgeFractions: [CGFloat] = [0.25, 0.5, 0.75]
-        var perDisplay: [CGDirectDisplayID: [Spot]] = [:]
-
-        for display in displays {
-            let f = display.frame
-            var grid: [Spot] = []
-            for (row, fy) in fractions.reversed().enumerated() {
-                let columns = row.isMultiple(of: 2) ? fractions : fractions.reversed()
-                for fx in columns {
-                    grid.append(Spot(point: CGPoint(x: f.minX + f.width * fx, y: f.minY + f.height * fy), displayID: display.id))
-                }
-            }
-            perDisplay[display.id] = grid
-        }
-
-        for (i, a) in displays.enumerated() {
-            for b in displays[(i + 1)...] {
-                for (k, t) in edgeFractions.enumerated() {
-                    guard let spot = edgeSpot(a, b, t: t, onA: k != 1) else { break }
-                    perDisplay[spot.displayID, default: []].append(spot)
-                }
-            }
-        }
-
-        return displays.flatMap { perDisplay[$0.id] ?? [] } + displays.flatMap(eyesOnlySpots)
-    }
-
-    /// Centre, then the corners of the 20/80 % box, per display.
-    private static func eyesOnlySpots(for display: DisplayInfo) -> [Spot] {
-        let f = display.frame
-        let fractions: [(CGFloat, CGFloat)] = [(0.5, 0.5), (0.2, 0.8), (0.8, 0.8), (0.8, 0.2), (0.2, 0.2)]
-        return fractions.map { fx, fy in
-            Spot(point: CGPoint(x: f.minX + f.width * fx, y: f.minY + f.height * fy), displayID: display.id, eyesOnly: true)
-        }
-    }
-
-    private static func edgeSpot(_ a: DisplayInfo, _ b: DisplayInfo, t: CGFloat, onA: Bool) -> Spot? {
-        let tolerance: CGFloat = 2
-        let inset: CGFloat = 0.04
-        let fa = a.frame, fb = b.frame
-        let id = onA ? a.id : b.id
-        let yLow = max(fa.minY, fb.minY), yHigh = min(fa.maxY, fb.maxY)
-        let xLow = max(fa.minX, fb.minX), xHigh = min(fa.maxX, fb.maxX)
-        let y = yLow + (yHigh - yLow) * t
-        let x = xLow + (xHigh - xLow) * t
-
-        if yHigh > yLow, abs(fa.maxX - fb.minX) <= tolerance {
-            return Spot(point: CGPoint(x: onA ? fa.maxX - fa.width * inset : fb.minX + fb.width * inset, y: y), displayID: id)
-        }
-        if yHigh > yLow, abs(fa.minX - fb.maxX) <= tolerance {
-            return Spot(point: CGPoint(x: onA ? fa.minX + fa.width * inset : fb.maxX - fb.width * inset, y: y), displayID: id)
-        }
-        if xHigh > xLow, abs(fa.maxY - fb.minY) <= tolerance {
-            return Spot(point: CGPoint(x: x, y: onA ? fa.maxY - fa.height * inset : fb.minY + fb.height * inset), displayID: id)
-        }
-        if xHigh > xLow, abs(fa.minY - fb.maxY) <= tolerance {
-            return Spot(point: CGPoint(x: x, y: onA ? fa.minY + fa.height * inset : fb.maxY - fb.height * inset), displayID: id)
-        }
-        return nil
+        finish(with: pendingOutcome ?? .cancelled)
     }
 
     private func run() async {
-        for (index, spot) in spots.enumerated() {
-            heldSpot = nil
-            if spot.eyesOnly, index == 0 || !spots[index - 1].eyesOnly || spots[index - 1].displayID != spot.displayID {
-                for overlay in overlays { overlay.label.stringValue = Self.eyesOnlyPrompt }
-                guard await pause(Self.eyesOnlyReadDuration) else { return }
+        for overlay in overlays {
+            for pass in Pass.allCases {
+                guard await pursue(on: overlay, pass) else { return }
             }
-            show(spot, index: index)
-            guard await pause(Self.moveDuration) else { return }
-            collectFrom = now() + Self.discardDuration
-            heldSpot = spot
-            let hold = spot.eyesOnly ? Self.eyesOnlyHoldDuration : Self.holdDuration
-            shrinkDot(on: spot.displayID, over: hold)
-            guard await pause(hold) else { return }
         }
-        heldSpot = nil
         guard await holdKeyboard() else { return }
-        finish(with: samples)
+        setLabels("Computing calibration…")
+        let traces = traces
+        let fitTask = Task.detached(priority: .userInitiated) { CalibrationFit(traces: traces) }
+        self.fitTask = fitTask
+        let fit = await fitTask.value
+        self.fitTask = nil
+        guard isRunning else { return }
+        let calibration = makeCalibration(fit)
+        if let calibration {
+            let error = calibration.typicalErrorCm.map { String(format: "%.1f cm", $0) }
+                ?? String(format: "%.0f pt", fit?.medianError ?? 0)
+            setLabels("Calibration done — typical error ≈ \(error)")
+        } else {
+            setLabels("Calibration failed — the camera saw too little of your face. Try again.")
+        }
+        pendingOutcome = calibration.map(Outcome.calibrated) ?? .failed
+        guard await pause(Self.resultDuration) else { return }
+        finish(with: pendingOutcome ?? .cancelled)
+    }
+
+    /// One pass on one display: instruction with the ball resting at the path start, then the ball
+    /// moves at constant physical speed while every face frame is recorded.
+    private func pursue(on overlay: Overlay, _ pass: Pass) async -> Bool {
+        let path = PursuitPath.serpentine(in: overlay.display.frame, rows: pass.rows)
+        var trace = PursuitTrace(displayID: overlay.display.id, path: path, speed: Self.ballSpeed(on: overlay.display),
+                                 start: .infinity)
+        showBall(at: path.start, on: overlay.display.id)
+        for other in overlays {
+            other.label.stringValue = other.display.id == overlay.display.id
+                ? "\(pass.prompt)\nEsc cancels."
+                : "Look at \(overlay.display.name): the ball is there. Esc cancels."
+        }
+        guard await pause(Self.readDuration) else { return false }
+
+        trace.start = now()
+        activeTrace = trace
+        overlay.label.stringValue = ""
+        let ticker = Ticker { [weak self] in self?.moveBall() }
+        let link = overlay.window.contentView?.displayLink(target: ticker, selector: #selector(Ticker.step))
+        link?.add(to: .main, forMode: .common)
+        displayLink = link
+        let completed = await pause(trace.duration)
+        stopBall()
+        if completed, let activeTrace { traces.append(activeTrace) }
+        activeTrace = nil
+        return completed
+    }
+
+    private func moveBall() {
+        guard let activeTrace, let overlay = overlays.first(where: { $0.display.id == activeTrace.displayID }) else { return }
+        let p = activeTrace.target(at: now())
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        overlay.ball.position = CGPoint(x: p.x - overlay.display.frame.minX, y: p.y - overlay.display.frame.minY)
+        CATransaction.commit()
+    }
+
+    private func stopBall() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    private func showBall(at point: CGPoint, on displayID: CGDirectDisplayID?) {
+        for overlay in overlays {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            overlay.ball.isHidden = overlay.display.id != displayID
+            overlay.ball.position = CGPoint(x: point.x - overlay.display.frame.minX, y: point.y - overlay.display.frame.minY)
+            CATransaction.commit()
+        }
+    }
+
+    private func setLabels(_ text: String) {
+        for overlay in overlays { overlay.label.stringValue = text }
     }
 
     /// Keyboard pose: samples labelled `awayDisplayID` teach the away classifier what "looking down" is.
     /// The prompt stays readable for a moment before collection, so reading frames are not labelled away.
     private func holdKeyboard() async -> Bool {
-        for overlay in overlays {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            overlay.dot.isHidden = true
-            CATransaction.commit()
-            overlay.label.stringValue = Self.keyboardPrompt
-        }
+        showBall(at: .zero, on: nil)
+        setLabels(Self.keyboardPrompt)
         guard await pause(Self.keyboardReadDuration) else { return false }
         collectFrom = now() + Self.keyboardDiscardDuration
-        heldSpot = Spot(point: .zero, displayID: CalibrationSample.awayDisplayID)
+        collectingKeyboard = true
         for remaining in stride(from: Self.keyboardHoldSeconds, to: 0, by: -1) {
-            for overlay in overlays { overlay.label.stringValue = "\(Self.keyboardPrompt)\n\(remaining)" }
+            setLabels("\(Self.keyboardPrompt)\n\(remaining)")
             guard await pause(1) else { return false }
         }
-        heldSpot = nil
+        collectingKeyboard = false
         return true
+    }
+
+    /// Nil unless the fit succeeded and every display has samples.
+    private func makeCalibration(_ fit: CalibrationFit?) -> Calibration? {
+        let displays = overlays.map(\.display)
+        guard let fit, Set(fit.samples.map(\.displayID)) == Set(displays.map(\.id)),
+              GazeModel(samples: fit.samples, lambda: fit.lambda) != nil
+        else { return nil }
+        let largest = displays.compactMap { d in Self.pointsPerMillimetre(d).map { (d, $0) } }
+            .max { a, b in Self.longestSide(a.0) / a.1 < Self.longestSide(b.0) / b.1 }
+        return Calibration(samples: fit.samples + keyboardSamples, displays: displays, lambda: fit.lambda,
+                           noiseRadius: fit.noiseRadius, typicalErrorCm: largest.map { fit.medianError / $0.1 / 10 })
+    }
+
+    private static func ballSpeed(on display: DisplayInfo) -> Double {
+        pointsPerMillimetre(display).map { ballSpeedMM * $0 } ?? fallbackSpeed
+    }
+
+    /// Pixels are square, so longest side over longest side holds whether or not the reported
+    /// physical size follows a rotated display.
+    private static func pointsPerMillimetre(_ display: DisplayInfo) -> Double? {
+        let size = CGDisplayScreenSize(display.id)
+        let millimetres = max(size.width, size.height)
+        guard millimetres > 0, longestSide(display) > 0 else { return nil }
+        return Double(longestSide(display) / millimetres)
+    }
+
+    private static func longestSide(_ display: DisplayInfo) -> Double {
+        Double(max(display.frame.width, display.frame.height))
     }
 
     private func pause(_ seconds: TimeInterval) async -> Bool {
@@ -195,57 +253,33 @@ final class CalibrationController {
         case 53:
             cancel()
         case 49 where runTask == nil:
-            for overlay in overlays { overlay.label.stringValue = "Follow the dot. Esc cancels." }
             runTask = Task { await run() }
         default:
             break
         }
     }
 
-    private func show(_ spot: Spot, index: Int) {
-        for overlay in overlays {
-            let local = CGPoint(x: spot.point.x - overlay.frame.minX, y: spot.point.y - overlay.frame.minY)
-            let active = overlay.displayID == spot.displayID
-            CATransaction.begin()
-            CATransaction.setAnimationDuration(Self.moveDuration)
-            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
-            if active, !overlay.dot.isHidden {
-                overlay.dot.position = local
-            } else {
-                CATransaction.setDisableActions(true)
-                overlay.dot.position = local
-                overlay.dot.isHidden = !active
-            }
-            overlay.dot.transform = CATransform3DIdentity
-            CATransaction.commit()
-            let progress = "Spot \(index + 1) of \(spots.count). Esc cancels."
-            overlay.label.stringValue = spot.eyesOnly ? "\(Self.eyesOnlyPrompt)\n\(progress)" : progress
-        }
-    }
-
-    private func shrinkDot(on displayID: CGDirectDisplayID, over duration: TimeInterval) {
-        guard let overlay = overlays.first(where: { $0.displayID == displayID }) else { return }
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(duration)
-        overlay.dot.transform = CATransform3DMakeScale(0.45, 0.45, 1)
-        CATransaction.commit()
-    }
-
-    private func finish(with result: [CalibrationSample]?) {
+    private func finish(with outcome: Outcome) {
         isRunning = false
         runTask?.cancel()
         runTask = nil
-        heldSpot = nil
+        fitTask?.cancel()
+        fitTask = nil
+        pendingOutcome = nil
+        stopBall()
+        activeTrace = nil
+        collectingKeyboard = false
         for overlay in overlays { overlay.window.orderOut(nil) }
         overlays = []
-        spots = []
-        samples = []
+        traces = []
+        keyboardSamples = []
         let completion = completion
         self.completion = nil
-        completion?(result)
+        completion?(outcome)
     }
 
-    private func makeOverlay(displayID: CGDirectDisplayID, frame: CGRect) -> Overlay {
+    private func makeOverlay(_ display: DisplayInfo) -> Overlay {
+        let frame = display.frame
         let window = OverlayWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
         window.setFrame(frame, display: false)
         window.isReleasedWhenClosed = false
@@ -259,7 +293,7 @@ final class CalibrationController {
         let view = NSView(frame: CGRect(origin: .zero, size: frame.size))
         view.wantsLayer = true
 
-        let label = NSTextField(wrappingLabelWithString: "Look at the dot the way you normally would — head and eyes. Press Space to start.")
+        let label = NSTextField(wrappingLabelWithString: "Follow the ball across each screen, first with your head and eyes, then with your eyes only. Press Space to start.")
         label.alignment = .center
         label.textColor = .white
         label.font = .systemFont(ofSize: 22, weight: .medium)
@@ -271,17 +305,23 @@ final class CalibrationController {
             label.widthAnchor.constraint(lessThanOrEqualToConstant: min(720, frame.width * 0.8)),
         ])
 
-        let dot = CALayer()
-        dot.bounds = CGRect(x: 0, y: 0, width: Self.dotDiameter, height: Self.dotDiameter)
-        dot.cornerRadius = Self.dotDiameter / 2
-        dot.backgroundColor = NSColor.systemRed.cgColor
-        dot.borderColor = NSColor.white.cgColor
-        dot.borderWidth = 3
-        dot.isHidden = true
-        view.layer?.addSublayer(dot)
+        let ball = CALayer()
+        ball.bounds = CGRect(x: 0, y: 0, width: Self.ballDiameter, height: Self.ballDiameter)
+        ball.cornerRadius = Self.ballDiameter / 2
+        ball.backgroundColor = NSColor.white.cgColor
+        ball.borderColor = NSColor.systemRed.cgColor
+        ball.borderWidth = 3
+        ball.isHidden = true
+        let centre = CALayer()
+        centre.bounds = CGRect(x: 0, y: 0, width: Self.centreDiameter, height: Self.centreDiameter)
+        centre.cornerRadius = Self.centreDiameter / 2
+        centre.backgroundColor = NSColor.black.cgColor
+        centre.position = CGPoint(x: Self.ballDiameter / 2, y: Self.ballDiameter / 2)
+        ball.addSublayer(centre)
+        view.layer?.addSublayer(ball)
 
         window.contentView = view
-        return Overlay(displayID: displayID, frame: frame, window: window, dot: dot, label: label)
+        return Overlay(display: display, window: window, ball: ball, label: label)
     }
 
     private func screenID(_ screen: NSScreen) -> CGDirectDisplayID? {

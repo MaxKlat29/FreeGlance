@@ -19,13 +19,17 @@ final class AppState: ObservableObject {
     @Published private(set) var displays: [DisplayInfo] = []
     @Published private(set) var calibratedDisplayIDs: Set<CGDirectDisplayID> = []
     @Published private(set) var keyboardCalibrated = false
+    /// Median calibration error on the largest display, nil when unknown.
+    @Published private(set) var calibrationErrorCm: Double?
     @Published private(set) var cameras: [CameraChoice] = []
     @Published private(set) var needsRecalibration = false
 
     private enum Suspension { case sleep, screensSleep, locked, screensaver, sessionInactive }
 
-    private static let clickWeight = 0.3
     private static let clickBufferSize = 300
+    /// Share of the model's total weight a full click buffer carries, so clicks can still correct
+    /// a local offset against thousands of pursuit frames.
+    private static let clickShare = 0.2
     private static let refitInterval: TimeInterval = 5
     private static let driftWindow = 20
     private static let driftRatio = 0.4
@@ -53,7 +57,9 @@ final class AppState: ObservableObject {
     private var paneKeyCache: (point: CGPoint, time: TimeInterval, key: PaneKey?)?
     /// Screen selection: One Euro filtered model point.
     private var gazeFilter = OneEuroFilter()
-    /// Eye tracker dot and same-screen targeting: fixation-smoothed on top of `gazeFilter`.
+    /// Eye tracker dot and same-screen targeting: median of three raw model points (no single-frame
+    /// spikes), then fixation-smoothed with the calibration's measured noise radius.
+    private var spikeFilter = MedianFilter()
     private var fixationFilter = FixationFilter()
     /// Screens switch this long after the last keystroke; panes wait for the full typing pause.
     private static let screenTypingBeat: TimeInterval = 0.4
@@ -136,7 +142,7 @@ final class AppState: ObservableObject {
         resetFocusState()
         let controller = CalibrationController()
         calibrationController = controller
-        controller.start { [weak self] samples in self?.finishCalibration(samples) }
+        controller.start { [weak self] outcome in self?.finishCalibration(outcome) }
         updateCamera()
     }
 
@@ -158,6 +164,7 @@ final class AppState: ObservableObject {
         latestFeaturesAt = now
         guard let features else {
             gazeFilter.reset()
+            spikeFilter.reset()
             fixationFilter.reset()
             paneDwell.reset()
             selector.hold()
@@ -180,7 +187,7 @@ final class AppState: ObservableObject {
 
         let raw = model.predictPoint(features)
         let point = gazeFilter.filter(raw, at: features.timestamp)
-        let fixation = fixationFilter.filter(raw, at: features.timestamp)
+        let fixation = fixationFilter.filter(spikeFilter.filter(raw, at: features.timestamp), at: features.timestamp)
         isAway = awayDetector.isAway(features) || selector.isAway(point)
         updateScreen(point: point, at: features.timestamp)
 
@@ -249,29 +256,31 @@ final class AppState: ObservableObject {
             return
         }
         let samples = calibration.samples + clickSamples
-        model = GazeModel(samples: samples)
+        model = GazeModel(samples: samples, lambda: calibration.lambda)
+        fixationFilter.radius = calibration.noiseRadius
         awayDetector = AwayDetector(samples: samples)
         lastRefit = now
         updateStatus()
         updateCamera()
     }
 
-    private func finishCalibration(_ samples: [CalibrationSample]?) {
+    private func finishCalibration(_ outcome: CalibrationController.Outcome) {
         calibrationController = nil
-        guard let samples else {
+        let result: Calibration
+        switch outcome {
+        case .cancelled:
             updateStatus()
             updateCamera()
             return
-        }
-        let screenIDs = Set(samples.filter { !$0.isAway }.map(\.displayID))
-        guard GazeModel(samples: samples) != nil, screenIDs == Set(displays.map(\.id)) else {
+        case let .calibrated(calibration) where calibration.matches(displays: displays):
+            result = calibration
+        case .calibrated, .failed:
             calibrationFailed = true
             updateStatus()
             updateCamera()
             return
         }
         calibrationFailed = false
-        let result = Calibration(samples: samples, displays: displays)
         result.save()
         calibration = result
         updateCalibratedState()
@@ -303,13 +312,14 @@ final class AppState: ObservableObject {
         }
         // A click while looking at the keyboard says nothing about where the eyes point.
         guard calibrationController == nil, !isPaused, !needsRecalibration, model != nil, !isAway,
-              let features = freshFeatures else { return }
+              let calibration, let features = freshFeatures else { return }
 
         if displays.count >= 2, let predicted {
             trackDrift(clicked: clicked.id, predicted: predicted)
         }
         guard settings.learnFromClicks else { return }
-        clickSamples.append(CalibrationSample(features: features, point: point, displayID: clicked.id, weight: Self.clickWeight))
+        let weight = calibration.clickWeight(bufferSize: Self.clickBufferSize, share: Self.clickShare)
+        clickSamples.append(CalibrationSample(features: features, point: point, displayID: clicked.id, weight: weight))
         if clickSamples.count > Self.clickBufferSize {
             clickSamples.removeFirst(clickSamples.count - Self.clickBufferSize)
         }
@@ -320,6 +330,7 @@ final class AppState: ObservableObject {
         let samples = calibration?.samples ?? []
         calibratedDisplayIDs = Set(samples.filter { !$0.isAway }.map(\.displayID))
         keyboardCalibrated = samples.contains(where: \.isAway)
+        calibrationErrorCm = calibration?.typicalErrorCm
     }
 
     private func scheduleRefit() {
