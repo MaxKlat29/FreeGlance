@@ -1,8 +1,8 @@
 # FreeGlance
 
 Native macOS menu bar app (macOS 14+, Swift 6, SwiftUI + AppKit). Camera estimates which
-screen / window / split pane the user faces and moves keyboard focus there. Functional clone
-of the GlanceSwitch Mac app, without licensing, updater or branding.
+screen / window / split pane the user faces and moves keyboard focus there. No licensing,
+no updater, no network.
 
 Bundle id `de.klattig.FreeGlance`, `LSUIElement = YES`, starts at login (SMAppService).
 Permissions: Camera, Accessibility. Nothing else (no Screen Recording, no Input Monitoring).
@@ -104,7 +104,7 @@ struct InputGuard { static func secondsSinceKey() -> Double; static func seconds
 //   window under that point belongs to the target pid.
 ```
 
-## Behaviour rules (from the reference product)
+## Behaviour rules
 
 - Screen switch: full model point (head + eyes, One Euro filtered; 96 % vs 87-89 % head-only on real data),
   dwell 150 ms (half when the point is clearly on the other screen), hysteresis so bezel glances don't ping-pong.
