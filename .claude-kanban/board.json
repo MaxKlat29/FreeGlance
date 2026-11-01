@@ -3,7 +3,7 @@
   "project": "FreeGlance",
   "project_path": "/Users/maximilianklattig/Documents/DEV/FreeGlance",
   "created": "2026-11-01T12:59:23Z",
-  "updated": "2026-11-01T13:17:32Z",
+  "updated": "2026-11-01T13:24:28Z",
   "columns": [
     {
       "id": "backlog",
@@ -37,7 +37,7 @@
       ],
       "session": "",
       "created": "2026-11-01T12:59:23Z",
-      "updated": "2026-11-01T13:17:32Z",
+      "updated": "2026-11-01T13:24:28Z",
       "started_at": "2026-11-01T12:59:25Z",
       "completed_at": null,
       "comments": [],
@@ -65,6 +65,12 @@
           "agent": "claude",
           "level": "success",
           "msg": "Build+24 Tests gruen, Commit e6f7244, installiert nach /Applications, laeuft. Wartet auf Max: Kamera/Bedienungshilfen freigeben, kalibrieren, Praxistest"
+        },
+        {
+          "ts": "2026-11-01T13:24:28Z",
+          "agent": "claude",
+          "level": "success",
+          "msg": "Tuning: Kopfmodell linear (L/R-Fehler 223->112pt), One-Euro-Filter, 30fps, Delays 150/200ms, Screen nach 0.4s Tipp-Pause"
         }
       ]
     }

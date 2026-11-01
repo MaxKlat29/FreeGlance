@@ -8,12 +8,16 @@ struct DisplayInfo: Sendable, Equatable {
 }
 
 struct ScreenSelector: Sendable {
+    /// Points this far (fraction of its height) below the lowest display count as away.
+    static let belowLowestFraction = 0.1
+
     var displays: [DisplayInfo] {
         didSet {
             if let current, !displays.contains(where: { $0.id == current }) {
                 self.current = nil
             }
             pending.reset()
+            pendingSwitch = nil
         }
     }
     var dwell: TimeInterval
@@ -21,6 +25,8 @@ struct ScreenSelector: Sendable {
     var hysteresis: Double
     var ignoreMargin: Double
     private(set) var current: CGDirectDisplayID?
+    /// A fired switch that focus has not applied yet (typing, mouse in use) and the screen it left.
+    private(set) var pendingSwitch: (to: CGDirectDisplayID, from: CGDirectDisplayID)?
     private var pending: Dwell<CGDirectDisplayID>
 
     init(displays: [DisplayInfo], dwell: TimeInterval = 0.3, turnThreshold: Double = 0.5,
@@ -40,28 +46,55 @@ struct ScreenSelector: Sendable {
     mutating func setCurrent(_ id: CGDirectDisplayID?) {
         current = id.flatMap { id in displays.contains { $0.id == id } ? id : nil }
         pending.reset()
+        pendingSwitch = nil
     }
 
-    mutating func update(headPoint: CGPoint, at t: TimeInterval) -> CGDirectDisplayID? {
-        guard displays.count >= 2 else { return nil }
+    /// Hands a fired switch to focus; it counts as applied from here on.
+    mutating func takePendingSwitch() -> CGDirectDisplayID? {
+        defer { pendingSwitch = nil }
+        return pendingSwitch?.to
+    }
+
+    /// Holds the screen focus is on: drops the pending dwell and undoes a switch not applied yet.
+    mutating func hold() {
+        if let from = pendingSwitch?.from { current = from }
+        pendingSwitch = nil
+        pending.reset()
+    }
+
+    /// Geometric away rule: far outside every screen, or clearly below the lowest one (keyboard, desk).
+    func isAway(_ p: CGPoint) -> Bool {
+        guard let lowest = displays.min(by: { $0.frame.minY < $1.frame.minY }) else { return false }
         let bounds = displays.reduce(CGRect.null) { $0.union($1.frame) }
             .insetBy(dx: -ignoreMargin, dy: -ignoreMargin)
-        guard bounds.contains(headPoint) else {
-            pending.reset()
+        let floor = Double(lowest.frame.minY) - Self.belowLowestFraction * Double(lowest.frame.height)
+        return !bounds.contains(p) || Double(p.y) < floor
+    }
+
+    /// Feeds one gaze point. `away` (from the keyboard classifier) holds the current screen like
+    /// the geometric rule does. Returns the display id only when a switch fires.
+    @discardableResult
+    mutating func update(point: CGPoint, away: Bool = false, at t: TimeInterval) -> CGDirectDisplayID? {
+        guard displays.count >= 2 else { return nil }
+        guard !away, !isAway(point) else {
+            hold()
             return nil
         }
         guard let from = displays.first(where: { $0.id == current }) else {
-            current = nearest(to: headPoint)?.id
+            current = nearest(to: point)?.id
             pending.reset()
             return nil
         }
         let required = turnThreshold + hysteresis
         let candidate = displays
-            .filter { $0.id != from.id && Self.fraction(of: headPoint, from: from.frame, to: $0.frame) > required }
-            .min { Self.distance(headPoint, $0.frame) < Self.distance(headPoint, $1.frame) }?
-            .id
-        pending.duration = dwell
-        guard let fired = pending.update(candidate, at: t) else { return nil }
+            .filter { $0.id != from.id }
+            .map { (id: $0.id, frame: $0.frame, fraction: Self.fraction(of: point, from: from.frame, to: $0.frame)) }
+            .filter { $0.fraction > required }
+            .min { Self.distance(point, $0.frame) < Self.distance(point, $1.frame) }
+        pending.duration = (candidate?.fraction ?? 0) >= 1 ? dwell / 2 : dwell
+        guard let fired = pending.update(candidate?.id, at: t) else { return nil }
+        let origin = pendingSwitch?.from ?? from.id
+        pendingSwitch = fired == origin ? nil : (fired, origin)
         current = fired
         return fired
     }

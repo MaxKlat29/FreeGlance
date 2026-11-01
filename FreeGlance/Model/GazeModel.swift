@@ -3,38 +3,26 @@ import Foundation
 
 struct GazeModel: Sendable {
     static let minimumSamples = 6
-    // Measured on real calibration data (leave-one-spot-out): head pose overfits with quadratic
-    // terms, the full model needs stronger regularization to keep its tail error down.
-    static let headRegularization = 1e-3
-    static let fullRegularization = 0.03
+    // Measured on real calibration data (leave-one-spot-out): the full model needs strong
+    // regularization to keep its tail error down.
+    static let regularization = 0.03
 
     private let full: RidgeRegression
-    private let head: RidgeRegression
 
     init?(samples: [CalibrationSample]) {
         let usable = samples.filter { s in
-            s.weight > 0 && s.weight.isFinite && s.point.x.isFinite && s.point.y.isFinite
+            !s.isAway && s.weight > 0 && s.weight.isFinite && s.point.x.isFinite && s.point.y.isFinite
                 && s.features.fullVector.allSatisfy(\.isFinite)
         }
-        guard usable.count >= Self.minimumSamples else { return nil }
-        let targets = usable.map(\.point)
-        let weights = usable.map(\.weight)
-        guard
-            let full = RidgeRegression(inputs: usable.map(\.features.fullVector), targets: targets,
-                                       weights: weights, lambda: Self.fullRegularization, quadratic: true),
-            let head = RidgeRegression(inputs: usable.map(\.features.headVector), targets: targets,
-                                       weights: weights, lambda: Self.headRegularization, quadratic: false)
+        guard usable.count >= Self.minimumSamples,
+              let full = RidgeRegression(inputs: usable.map(\.features.fullVector), targets: usable.map(\.point),
+                                         weights: usable.map(\.weight), lambda: Self.regularization, quadratic: true)
         else { return nil }
         self.full = full
-        self.head = head
     }
 
     func predictPoint(_ f: GazeFeatures) -> CGPoint {
         full.predict(f.fullVector)
-    }
-
-    func headPoint(_ f: GazeFeatures) -> CGPoint {
-        head.predict(f.headVector)
     }
 }
 
@@ -58,9 +46,9 @@ struct RidgeRegression: Sendable {
         let totalWeight = weights.reduce(0, +)
         guard totalWeight > 0 else { return nil }
 
-        let input = Self.standardization(of: inputs, weights: weights, total: totalWeight)
+        let input = LinearAlgebra.standardization(of: inputs, weights: weights, total: totalWeight)
         let expanded = inputs.map { Self.expand(Self.apply($0, mean: input.mean, scale: input.scale), quadratic: quadratic) }
-        let feature = Self.standardization(of: expanded, weights: weights, total: totalWeight)
+        let feature = LinearAlgebra.standardization(of: expanded, weights: weights, total: totalWeight)
         let design = expanded.map { Self.apply($0, mean: feature.mean, scale: feature.scale) }
 
         let meanX = zip(targets, weights).reduce(0) { $0 + Double($1.0.x) * $1.1 } / totalWeight
@@ -89,9 +77,9 @@ struct RidgeRegression: Sendable {
                 gram[i * n + j] = gram[j * n + i]
             }
         }
-        guard let factor = Self.cholesky(gram, n: n) else { return nil }
-        coefficientsX = Self.solve(factor, n: n, rhs: rhsX)
-        coefficientsY = Self.solve(factor, n: n, rhs: rhsY)
+        guard let factor = LinearAlgebra.cholesky(gram, n: n) else { return nil }
+        coefficientsX = LinearAlgebra.solve(factor, n: n, rhs: rhsX)
+        coefficientsY = LinearAlgebra.solve(factor, n: n, rhs: rhsY)
         interceptX = meanX
         interceptY = meanY
         inputMean = input.mean
@@ -127,8 +115,11 @@ struct RidgeRegression: Sendable {
     private static func apply(_ v: [Double], mean: [Double], scale: [Double]) -> [Double] {
         v.indices.map { (v[$0] - mean[$0]) / scale[$0] }
     }
+}
 
-    private static func standardization(of rows: [[Double]], weights: [Double], total: Double)
+/// Weighted standardization and a Cholesky solver shared by the in-house fits.
+enum LinearAlgebra {
+    static func standardization(of rows: [[Double]], weights: [Double], total: Double)
         -> (mean: [Double], scale: [Double]) {
         let width = rows[0].count
         var mean = [Double](repeating: 0, count: width)
@@ -150,7 +141,7 @@ struct RidgeRegression: Sendable {
         return (mean, scale)
     }
 
-    private static func cholesky(_ a: [Double], n: Int) -> [Double]? {
+    static func cholesky(_ a: [Double], n: Int) -> [Double]? {
         var l = [Double](repeating: 0, count: n * n)
         for i in 0..<n {
             for j in 0...i {
@@ -167,7 +158,7 @@ struct RidgeRegression: Sendable {
         return l
     }
 
-    private static func solve(_ l: [Double], n: Int, rhs: [Double]) -> [Double] {
+    static func solve(_ l: [Double], n: Int, rhs: [Double]) -> [Double] {
         var y = rhs
         for i in 0..<n {
             for k in 0..<i { y[i] -= l[i * n + k] * y[k] }

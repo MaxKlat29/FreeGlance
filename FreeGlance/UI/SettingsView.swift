@@ -177,26 +177,44 @@ private struct CalibrateTab: View {
         Form {
             Section("Displays") {
                 ForEach(appState.displays, id: \.id) { display in
-                    let calibrated = appState.calibratedDisplayIDs.contains(display.id) && !appState.needsRecalibration
-                    HStack {
-                        Text(display.name)
-                        Spacer()
-                        Label(
-                            calibrated ? "Calibrated" : "Not calibrated",
-                            systemImage: calibrated ? "checkmark.circle.fill" : "exclamationmark.circle"
-                        )
-                        .foregroundStyle(calibrated ? .green : .orange)
-                    }
+                    CalibrationRow(
+                        name: display.name,
+                        calibrated: appState.calibratedDisplayIDs.contains(display.id) && !appState.needsRecalibration
+                    )
+                }
+                let keyboard = appState.keyboardCalibrated && !appState.needsRecalibration
+                CalibrationRow(name: "Keyboard", calibrated: keyboard)
+                if !keyboard {
+                    Text("Recalibrate so that looking down at your keyboard never moves focus.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
             }
             Section {
-                Text("Look at each dot the way you normally would. Takes about half a minute per display.")
+                Text("Look at each dot the way you normally would, then at your keyboard. Takes about half a minute per display.")
                     .foregroundStyle(.secondary)
                 Button("Calibrate") { appState.startCalibration() }
                     .buttonStyle(.borderedProminent)
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct CalibrationRow: View {
+    let name: String
+    let calibrated: Bool
+
+    var body: some View {
+        HStack {
+            Text(name)
+            Spacer()
+            Label(
+                calibrated ? "Calibrated" : "Not calibrated",
+                systemImage: calibrated ? "checkmark.circle.fill" : "exclamationmark.circle"
+            )
+            .foregroundStyle(calibrated ? .green : .orange)
+        }
     }
 }
 
@@ -234,7 +252,7 @@ private struct GeneralTab: View {
                 .disabled(!settings.waitWhileTyping)
             }
             Section("Tracking") {
-                Toggle("Show gaze dot", isOn: $settings.showGazeDot)
+                Toggle("Show eye tracker", isOn: $settings.showGazeDot)
                 Toggle("Learn from clicks", isOn: $settings.learnFromClicks)
                 Picker("Camera", selection: $settings.cameraUniqueID) {
                     Text("Automatic").tag(String?.none)

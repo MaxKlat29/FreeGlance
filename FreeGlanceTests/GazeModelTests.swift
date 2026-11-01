@@ -24,11 +24,6 @@ final class GazeModelTests: XCTestCase {
                 y: 500 + 30 * f.pitch - 0.5 * f.pitch * f.pitch + 200 * f.eyeY + 1000 * (f.faceSize - 0.2))
     }
 
-    private func headTruth(_ f: GazeFeatures) -> CGPoint {
-        CGPoint(x: 1200 + 40 * f.yaw + 500 * (f.faceX - 0.5),
-                y: 500 + 30 * f.pitch + 800 * (f.faceY - 0.5))
-    }
-
     func testRecoversFullMapping() throws {
         var rng = LCG(state: 42)
         let samples = (0..<200).map { _ -> CalibrationSample in
@@ -46,20 +41,25 @@ final class GazeModelTests: XCTestCase {
         XCTAssertLessThan(errors.last!, 150)
     }
 
-    func testHeadModelIgnoresEyes() throws {
+    func testIgnoresAwaySamples() throws {
         var rng = LCG(state: 7)
-        let samples = (0..<200).map { _ -> CalibrationSample in
+        let screen = (0..<120).map { _ -> CalibrationSample in
             let f = features(&rng)
-            return CalibrationSample(features: f, point: headTruth(f), displayID: 1, weight: 1)
+            return CalibrationSample(features: f, point: fullTruth(f), displayID: 1, weight: 1)
         }
-        let model = try XCTUnwrap(GazeModel(samples: samples))
-        var f = features(&rng)
-        let expected = headTruth(f)
-        f.eyeX = -f.eyeX
-        f.eyeY = -f.eyeY
-        let predicted = model.headPoint(f)
-        XCTAssertEqual(predicted.x, expected.x, accuracy: 10)
-        XCTAssertEqual(predicted.y, expected.y, accuracy: 10)
+        let away = (0..<60).map { _ -> CalibrationSample in
+            var f = features(&rng)
+            f.pitch = -35
+            return CalibrationSample(features: f, point: .zero, displayID: CalibrationSample.awayDisplayID, weight: 1)
+        }
+        let plain = try XCTUnwrap(GazeModel(samples: screen))
+        let mixed = try XCTUnwrap(GazeModel(samples: screen + away))
+        for _ in 0..<10 {
+            let f = features(&rng)
+            XCTAssertEqual(mixed.predictPoint(f).x, plain.predictPoint(f).x, accuracy: 1e-6)
+            XCTAssertEqual(mixed.predictPoint(f).y, plain.predictPoint(f).y, accuracy: 1e-6)
+        }
+        XCTAssertNil(GazeModel(samples: Array(away.prefix(20))))
     }
 
     func testWeightsFavourHeavySamples() throws {

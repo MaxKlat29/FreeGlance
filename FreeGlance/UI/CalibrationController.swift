@@ -10,6 +10,10 @@ final class CalibrationController {
     private static let moveDuration: TimeInterval = 0.45
     private static let holdDuration: TimeInterval = 1.5
     private static let discardDuration: TimeInterval = 0.4
+    private static let keyboardPrompt = "Now look at your keyboard the way you do while typing. Hold for 3 seconds."
+    private static let keyboardReadDuration: TimeInterval = 1.5
+    private static let keyboardHoldSeconds = 3
+    private static let keyboardDiscardDuration: TimeInterval = 0.5
     private static let dotDiameter: CGFloat = 28
 
     private final class OverlayWindow: NSWindow {
@@ -31,7 +35,7 @@ final class CalibrationController {
     private var spots: [Spot] = []
     private var samples: [CalibrationSample] = []
     private var heldSpot: Spot?
-    private var holdStart: TimeInterval = 0
+    private var collectFrom: TimeInterval = 0
     private var runTask: Task<Void, Never>?
     private var completion: (([CalibrationSample]?) -> Void)?
 
@@ -59,7 +63,7 @@ final class CalibrationController {
     }
 
     func feed(_ features: GazeFeatures) {
-        guard let heldSpot, now() - holdStart >= Self.discardDuration else { return }
+        guard let heldSpot, now() >= collectFrom else { return }
         samples.append(CalibrationSample(features: features, point: heldSpot.point, displayID: heldSpot.displayID, weight: 1))
     }
 
@@ -127,13 +131,35 @@ final class CalibrationController {
             heldSpot = nil
             show(spot, index: index)
             guard await pause(Self.moveDuration) else { return }
-            holdStart = now()
+            collectFrom = now() + Self.discardDuration
             heldSpot = spot
             shrinkDot(on: spot.displayID)
             guard await pause(Self.holdDuration) else { return }
         }
         heldSpot = nil
+        guard await holdKeyboard() else { return }
         finish(with: samples)
+    }
+
+    /// Keyboard pose: samples labelled `awayDisplayID` teach the away classifier what "looking down" is.
+    /// The prompt stays readable for a moment before collection, so reading frames are not labelled away.
+    private func holdKeyboard() async -> Bool {
+        for overlay in overlays {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            overlay.dot.isHidden = true
+            CATransaction.commit()
+            overlay.label.stringValue = Self.keyboardPrompt
+        }
+        guard await pause(Self.keyboardReadDuration) else { return false }
+        collectFrom = now() + Self.keyboardDiscardDuration
+        heldSpot = Spot(point: .zero, displayID: CalibrationSample.awayDisplayID)
+        for remaining in stride(from: Self.keyboardHoldSeconds, to: 0, by: -1) {
+            for overlay in overlays { overlay.label.stringValue = "\(Self.keyboardPrompt)\n\(remaining)" }
+            guard await pause(1) else { return false }
+        }
+        heldSpot = nil
+        return true
     }
 
     private func pause(_ seconds: TimeInterval) async -> Bool {

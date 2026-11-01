@@ -7,6 +7,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let pauseItem = NSMenuItem(title: "Pause Tracking", action: nil, keyEquivalent: "g")
+    private let eyeTrackerItem = NSMenuItem(title: "Show Eye Tracker", action: nil, keyEquivalent: "e")
     private var cancellable: AnyCancellable?
 
     init(appState: AppState) {
@@ -33,6 +34,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         pauseItem.action = #selector(togglePause)
         menu.addItem(pauseItem)
 
+        eyeTrackerItem.keyEquivalentModifierMask = [.command, .shift]
+        eyeTrackerItem.target = self
+        eyeTrackerItem.action = #selector(toggleEyeTracker)
+        menu.addItem(eyeTrackerItem)
+
         menu.addItem(item("Recalibrate…", #selector(recalibrate)))
         menu.addItem(item("Settings…", #selector(showSettings), key: ","))
         menu.addItem(item("Welcome Guide…", #selector(showWelcome)))
@@ -51,6 +57,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func refresh() {
         statusLine.title = appState.status
         pauseItem.title = appState.isPaused ? "Resume Tracking" : "Pause Tracking"
+        eyeTrackerItem.state = appState.settings.showGazeDot ? .on : .off
         let symbol = appState.isPaused ? "eye.slash" : "eye"
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "FreeGlance")
         image?.isTemplate = true
@@ -62,6 +69,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func togglePause() { appState.togglePause() }
+    @objc private func toggleEyeTracker() { appState.toggleEyeTracker() }
     @objc private func recalibrate() { appState.startCalibration() }
     @objc private func showSettings() { appState.showSettings() }
     @objc private func showWelcome() { appState.showWelcome() }

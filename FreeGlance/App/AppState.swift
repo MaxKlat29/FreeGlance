@@ -18,6 +18,7 @@ final class AppState: ObservableObject {
     @Published private(set) var facingDisplay: CGDirectDisplayID?
     @Published private(set) var displays: [DisplayInfo] = []
     @Published private(set) var calibratedDisplayIDs: Set<CGDirectDisplayID> = []
+    @Published private(set) var keyboardCalibrated = false
     @Published private(set) var cameras: [CameraChoice] = []
     @Published private(set) var needsRecalibration = false
 
@@ -42,14 +43,14 @@ final class AppState: ObservableObject {
 
     private var calibration: Calibration?
     private var model: GazeModel?
+    private var awayDetector = AwayDetector(samples: [])
+    private var isAway = false
     private var selector = ScreenSelector(displays: [])
-    private var pendingDisplay: CGDirectDisplayID?
 
     private var paneDelay: TimeInterval
     private var paneDwell: Dwell<PaneKey>
     private var lastPaneKey: PaneKey?
     private var paneKeyCache: (point: CGPoint, time: TimeInterval, key: PaneKey?)?
-    private var headFilter = OneEuroFilter()
     private var gazeFilter = OneEuroFilter()
     /// Screens switch this long after the last keystroke; panes wait for the full typing pause.
     private static let screenTypingBeat: TimeInterval = 0.4
@@ -91,7 +92,7 @@ final class AppState: ObservableObject {
         camera = CameraSource { buffer, timestamp in analyzer.analyze(buffer, timestamp: timestamp) }
         focusEngine.start()
         calibration = Calibration.load()
-        calibratedDisplayIDs = Set(calibration?.samples.map(\.displayID) ?? [])
+        updateCalibratedState()
         reloadDisplays()
         reloadCameras()
         applySettings()
@@ -115,6 +116,11 @@ final class AppState: ObservableObject {
         if isPaused { resetFocusState() }
         updateCamera()
         updateStatus()
+        if isPaused, settings.showGazeDot { gazeDot?.showPaused() }
+    }
+
+    func toggleEyeTracker() {
+        settings.showGazeDot.toggle()
     }
 
     func startCalibration() {
@@ -148,9 +154,10 @@ final class AppState: ObservableObject {
         latestFeatures = features
         latestFeaturesAt = now
         guard let features else {
-            headFilter.reset()
             gazeFilter.reset()
             paneDwell.reset()
+            selector.hold()
+            syncFacingDisplay()
             return
         }
         if let calibrationController {
@@ -167,24 +174,24 @@ final class AppState: ObservableObject {
         let typing = settings.waitWhileTyping && sinceKey < settings.typingPauseSec
         let typingBeat = settings.waitWhileTyping && sinceKey < Self.screenTypingBeat
 
-        updateScreen(model: model, features: features)
+        let point = gazeFilter.filter(model.predictPoint(features), at: features.timestamp)
+        isAway = awayDetector.isAway(features) || selector.isAway(point)
+        updateScreen(point: point, at: features.timestamp)
 
-        if let pending = pendingDisplay, mouseIdle, !typingBeat {
-            pendingDisplay = nil
+        if mouseIdle, !typingBeat, let pending = selector.takePendingSwitch() {
             focusEngine.focus(display: pending)
             lastPaneKey = nil
             paneDwell = Dwell(duration: paneDelay)
         }
 
-        let point = gazeFilter.filter(model.predictPoint(features), at: features.timestamp)
         if settings.showGazeDot {
             if gazeDot == nil { gazeDot = GazeDotOverlay() }
-            gazeDot?.show(at: point)
+            gazeDot?.show(at: point, away: isAway)
         } else {
             gazeDot?.hide()
         }
 
-        guard settings.sameScreenFocus, pendingDisplay == nil, mouseIdle, !typing,
+        guard settings.sameScreenFocus, selector.pendingSwitch == nil, mouseIdle, !typing, !isAway,
               let facing = displays.first(where: { $0.id == facingDisplay }),
               facing.frame.contains(point) else {
             paneDwell = Dwell(duration: paneDelay)
@@ -196,12 +203,14 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func updateScreen(model: GazeModel, features: GazeFeatures) {
+    private func updateScreen(point: CGPoint, at t: TimeInterval) {
         guard displays.count >= 2 else { return }
-        let hadCurrent = selector.current != nil
-        if let fired = selector.update(headPoint: headFilter.filter(model.headPoint(features), at: features.timestamp), at: features.timestamp), hadCurrent {
-            pendingDisplay = fired
-        }
+        selector.update(point: point, away: isAway, at: t)
+        syncFacingDisplay()
+    }
+
+    private func syncFacingDisplay() {
+        guard displays.count >= 2 else { return }
         if facingDisplay != selector.current {
             facingDisplay = selector.current
             updateStatus()
@@ -219,7 +228,9 @@ final class AppState: ObservableObject {
     }
 
     private func resetFocusState() {
-        pendingDisplay = nil
+        selector.hold()
+        syncFacingDisplay()
+        isAway = false
         paneDwell = Dwell(duration: paneDelay)
         gazeDot?.hide()
     }
@@ -231,7 +242,9 @@ final class AppState: ObservableObject {
             updateCamera()
             return
         }
-        model = GazeModel(samples: calibration.samples + clickSamples)
+        let samples = calibration.samples + clickSamples
+        model = GazeModel(samples: samples)
+        awayDetector = AwayDetector(samples: samples)
         lastRefit = now
         updateStatus()
         updateCamera()
@@ -244,7 +257,8 @@ final class AppState: ObservableObject {
             updateCamera()
             return
         }
-        guard GazeModel(samples: samples) != nil, Set(samples.map(\.displayID)) == Set(displays.map(\.id)) else {
+        let screenIDs = Set(samples.filter { !$0.isAway }.map(\.displayID))
+        guard GazeModel(samples: samples) != nil, screenIDs == Set(displays.map(\.id)) else {
             calibrationFailed = true
             updateStatus()
             updateCamera()
@@ -254,7 +268,7 @@ final class AppState: ObservableObject {
         let result = Calibration(samples: samples, displays: displays)
         result.save()
         calibration = result
-        calibratedDisplayIDs = Set(result.samples.map(\.displayID))
+        updateCalibratedState()
         clickSamples = []
         driftLog = []
         needsRecalibration = false
@@ -274,7 +288,6 @@ final class AppState: ObservableObject {
     private func handleClick(at point: CGPoint) {
         lastPaneKey = PaneKey.at(point)
         paneDwell = Dwell(duration: paneDelay)
-        pendingDisplay = nil
         guard let clicked = displays.first(where: { $0.frame.contains(point) }) else { return }
         let predicted = facingDisplay
         if displays.count >= 2 {
@@ -282,7 +295,8 @@ final class AppState: ObservableObject {
             facingDisplay = selector.current
             updateStatus()
         }
-        guard calibrationController == nil, !isPaused, !needsRecalibration, model != nil,
+        // A click while looking at the keyboard says nothing about where the eyes point.
+        guard calibrationController == nil, !isPaused, !needsRecalibration, model != nil, !isAway,
               let features = freshFeatures else { return }
 
         if displays.count >= 2, let predicted {
@@ -294,6 +308,12 @@ final class AppState: ObservableObject {
             clickSamples.removeFirst(clickSamples.count - Self.clickBufferSize)
         }
         scheduleRefit()
+    }
+
+    private func updateCalibratedState() {
+        let samples = calibration?.samples ?? []
+        calibratedDisplayIDs = Set(samples.filter { !$0.isAway }.map(\.displayID))
+        keyboardCalibrated = samples.contains(where: \.isAway)
     }
 
     private func scheduleRefit() {
@@ -399,7 +419,6 @@ final class AppState: ObservableObject {
             return DisplayInfo(id: number.uint32Value, frame: screen.frame, name: screen.localizedName)
         }
         selector = makeSelector()
-        pendingDisplay = nil
         facingDisplay = displays.count == 1 ? displays[0].id : nil
         if let calibration {
             needsRecalibration = !calibration.matches(displays: displays)
@@ -425,7 +444,11 @@ final class AppState: ObservableObject {
             paneDelay = delay
             paneDwell = Dwell(duration: delay)
         }
-        if !settings.showGazeDot { gazeDot?.hide() }
+        if !settings.showGazeDot {
+            gazeDot?.hide()
+        } else if isPaused {
+            gazeDot?.showPaused()
+        }
         if !settings.learnFromClicks, !clickSamples.isEmpty {
             clickSamples = []
             rebuildModel()

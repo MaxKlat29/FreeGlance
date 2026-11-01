@@ -1,9 +1,11 @@
 import AppKit
+import Carbon.HIToolbox
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var appState: AppState?
     private var menuBar: MenuBarController?
     private var hotKey: HotKey?
+    private var eyeTrackerHotKey: HotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
@@ -13,7 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKey = HotKey { [weak state] in
             state?.togglePause()
         }
+        eyeTrackerHotKey = HotKey(keyCode: UInt32(kVK_ANSI_E)) { [weak state] in
+            state?.toggleEyeTracker()
+        }
         state.start()
+        if CommandLine.arguments.contains("--recalibrate") { state.startCalibration() }
     }
 
     @MainActor

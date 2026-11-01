@@ -8,7 +8,7 @@ final class ScreenSelectorTests: XCTestCase {
 
     private func selector() -> ScreenSelector {
         var s = ScreenSelector(displays: [left, right])
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 500, y: 300), at: 0))
+        XCTAssertNil(s.update(point: CGPoint(x: 500, y: 300), at: 0))
         XCTAssertEqual(s.current, 1)
         return s
     }
@@ -23,19 +23,34 @@ final class ScreenSelectorTests: XCTestCase {
 
     func testFiresAfterDwell() {
         var s = selector()
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 1500, y: 300), at: 1.0))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 1500, y: 300), at: 1.2))
-        XCTAssertEqual(s.update(headPoint: CGPoint(x: 1500, y: 300), at: 1.3), 2)
+        XCTAssertNil(s.update(point: CGPoint(x: 1400, y: 300), at: 1.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 1400, y: 300), at: 1.2))
+        XCTAssertEqual(s.update(point: CGPoint(x: 1400, y: 300), at: 1.3), 2)
         XCTAssertEqual(s.current, 2)
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 1500, y: 300), at: 1.5))
+        XCTAssertNil(s.update(point: CGPoint(x: 1400, y: 300), at: 1.5))
+    }
+
+    func testClearLookHalvesDwell() {
+        var s = selector()
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), at: 1.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), at: 1.1))
+        XCTAssertEqual(s.update(point: CGPoint(x: 1500, y: 300), at: 1.2), 2, "fraction >= 1 needs only half the 0.3 s dwell")
+    }
+
+    func testPartialLookKeepsFullDwell() {
+        var s = selector()
+        XCTAssertNil(s.update(point: CGPoint(x: 1450, y: 300), at: 1.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 1450, y: 300), at: 1.15))
+        XCTAssertNil(s.update(point: CGPoint(x: 1450, y: 300), at: 1.29))
+        XCTAssertEqual(s.update(point: CGPoint(x: 1450, y: 300), at: 1.3), 2)
     }
 
     func testShortGlanceDoesNotFire() {
         var s = selector()
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 1500, y: 300), at: 1.0))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 1500, y: 300), at: 1.2))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 500, y: 300), at: 1.25))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 500, y: 300), at: 2.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 1400, y: 300), at: 1.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 1400, y: 300), at: 1.2))
+        XCTAssertNil(s.update(point: CGPoint(x: 500, y: 300), at: 1.25))
+        XCTAssertNil(s.update(point: CGPoint(x: 500, y: 300), at: 2.0))
         XCTAssertEqual(s.current, 1)
     }
 
@@ -43,16 +58,16 @@ final class ScreenSelectorTests: XCTestCase {
         var s = selector()
         var t = 1.0
         for x in [990.0, 1010, 1060, 990, 1100, 1050] {
-            XCTAssertNil(s.update(headPoint: CGPoint(x: x, y: 300), at: t))
+            XCTAssertNil(s.update(point: CGPoint(x: x, y: 300), at: t))
             t += 0.5
         }
         XCTAssertEqual(s.current, 1)
 
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 1200, y: 300), at: t))
-        XCTAssertEqual(s.update(headPoint: CGPoint(x: 1200, y: 300), at: t + 0.35), 2)
+        XCTAssertNil(s.update(point: CGPoint(x: 1200, y: 300), at: t))
+        XCTAssertEqual(s.update(point: CGPoint(x: 1200, y: 300), at: t + 0.35), 2)
         t += 1
         for x in [1010.0, 990, 940, 1010, 900, 950] {
-            XCTAssertNil(s.update(headPoint: CGPoint(x: x, y: 300), at: t))
+            XCTAssertNil(s.update(point: CGPoint(x: x, y: 300), at: t))
             t += 0.5
         }
         XCTAssertEqual(s.current, 2)
@@ -61,31 +76,31 @@ final class ScreenSelectorTests: XCTestCase {
     func testThresholdControlsRequiredTurn() {
         var s = selector()
         s.turnThreshold = 0.2
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 900, y: 300), at: 1))
-        XCTAssertEqual(s.update(headPoint: CGPoint(x: 900, y: 300), at: 1.3), 2)
+        XCTAssertNil(s.update(point: CGPoint(x: 900, y: 300), at: 1))
+        XCTAssertEqual(s.update(point: CGPoint(x: 900, y: 300), at: 1.3), 2)
     }
 
     func testFarPosesIgnored() {
         var s = selector()
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 2500, y: 300), at: 1.0))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 2500, y: 300), at: 2.0))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 1500, y: -1000), at: 3.0))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 1500, y: -1000), at: 4.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 2500, y: 300), at: 1.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 2500, y: 300), at: 2.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: -1000), at: 3.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: -1000), at: 4.0))
         XCTAssertEqual(s.current, 1)
     }
 
     func testFarPoseInterruptsDwell() {
         var s = selector()
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 1500, y: 300), at: 1.0))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 5000, y: 300), at: 1.1))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 1500, y: 300), at: 1.35))
-        XCTAssertEqual(s.update(headPoint: CGPoint(x: 1500, y: 300), at: 1.7), 2)
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), at: 1.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 5000, y: 300), at: 1.1))
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), at: 1.35))
+        XCTAssertEqual(s.update(point: CGPoint(x: 1500, y: 300), at: 1.7), 2)
     }
 
     func testSingleDisplayNeverFires() {
         var s = ScreenSelector(displays: [left])
         for i in 0..<20 {
-            XCTAssertNil(s.update(headPoint: CGPoint(x: Double(i * 100), y: 300), at: Double(i)))
+            XCTAssertNil(s.update(point: CGPoint(x: Double(i * 100), y: 300), at: Double(i)))
         }
         XCTAssertNil(s.current)
     }
@@ -93,23 +108,89 @@ final class ScreenSelectorTests: XCTestCase {
     func testPicksStrongestOfSeveralCandidates() {
         let top = DisplayInfo(id: 3, frame: CGRect(x: 0, y: 600, width: 1000, height: 600), name: "Top")
         var s = ScreenSelector(displays: [left, right, top])
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 500, y: 300), at: 0))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 600, y: 900), at: 1))
-        XCTAssertEqual(s.update(headPoint: CGPoint(x: 600, y: 900), at: 1.3), 3)
+        XCTAssertNil(s.update(point: CGPoint(x: 500, y: 300), at: 0))
+        XCTAssertNil(s.update(point: CGPoint(x: 600, y: 900), at: 1))
+        XCTAssertEqual(s.update(point: CGPoint(x: 600, y: 900), at: 1.3), 3)
     }
 
     func testPicksFacedDisplayInRowOfThree() {
         let far = DisplayInfo(id: 3, frame: CGRect(x: 2000, y: 0, width: 1000, height: 600), name: "Far")
         var s = ScreenSelector(displays: [left, right, far])
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 500, y: 300), at: 0))
-        XCTAssertNil(s.update(headPoint: CGPoint(x: 2500, y: 300), at: 1))
-        XCTAssertEqual(s.update(headPoint: CGPoint(x: 2500, y: 300), at: 1.3), 3)
+        XCTAssertNil(s.update(point: CGPoint(x: 500, y: 300), at: 0))
+        XCTAssertNil(s.update(point: CGPoint(x: 2500, y: 300), at: 1))
+        XCTAssertEqual(s.update(point: CGPoint(x: 2500, y: 300), at: 1.3), 3)
         XCTAssertEqual(s.current, 3)
+    }
+
+    func testLookingBelowLowestDisplayHoldsCurrent() {
+        let top = DisplayInfo(id: 1, frame: CGRect(x: 0, y: 600, width: 1000, height: 600), name: "Ultrawide")
+        let bottom = DisplayInfo(id: 2, frame: CGRect(x: 0, y: 0, width: 1000, height: 600), name: "MacBook")
+        var s = ScreenSelector(displays: [top, bottom])
+        XCTAssertNil(s.update(point: CGPoint(x: 500, y: 900), at: 0))
+        XCTAssertEqual(s.current, 1)
+
+        let keyboard = CGPoint(x: 500, y: -100)
+        XCTAssertTrue(s.isAway(keyboard))
+        XCTAssertFalse(s.isAway(CGPoint(x: 500, y: -30)))
+        for t in stride(from: 1.0, through: 3.0, by: 0.1) {
+            XCTAssertNil(s.update(point: keyboard, at: t))
+        }
+        XCTAssertEqual(s.current, 1)
+    }
+
+    func testAwayFlagHoldsCurrentAndResetsDwell() {
+        var s = selector()
+        XCTAssertNil(s.update(point: CGPoint(x: 1400, y: 300), at: 1.0))
+        XCTAssertNil(s.update(point: CGPoint(x: 1400, y: 300), away: true, at: 1.2))
+        XCTAssertNil(s.update(point: CGPoint(x: 1400, y: 300), away: true, at: 2.0))
+        XCTAssertEqual(s.current, 1)
+        XCTAssertNil(s.update(point: CGPoint(x: 1400, y: 300), at: 2.1))
+        XCTAssertNil(s.update(point: CGPoint(x: 1400, y: 300), at: 2.3))
+        XCTAssertEqual(s.update(point: CGPoint(x: 1400, y: 300), at: 2.45), 2)
     }
 
     func testRemovingCurrentDisplayResetsCurrent() {
         var s = selector()
         s.displays = [right]
         XCTAssertNil(s.current)
+    }
+
+    func testAwayUndoesSwitchFocusHasNotApplied() {
+        var s = selector()
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), at: 1.0))
+        XCTAssertEqual(s.update(point: CGPoint(x: 1500, y: 300), at: 1.2), 2)
+        XCTAssertEqual(s.pendingSwitch?.to, 2, "typing holds the switch, focus does not take it")
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), away: true, at: 1.4))
+        XCTAssertNil(s.pendingSwitch)
+        XCTAssertEqual(s.current, 1)
+        XCTAssertNil(s.update(point: CGPoint(x: 500, y: 300), at: 2.0))
+        XCTAssertNil(s.takePendingSwitch(), "looking back must not run the stale switch")
+        XCTAssertEqual(s.current, 1)
+    }
+
+    func testAwayKeepsSwitchFocusApplied() {
+        var s = selector()
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), at: 1.0))
+        XCTAssertEqual(s.update(point: CGPoint(x: 1500, y: 300), at: 1.2), 2)
+        XCTAssertEqual(s.takePendingSwitch(), 2)
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), away: true, at: 1.4))
+        XCTAssertEqual(s.current, 2)
+    }
+
+    func testSwitchBackToOriginClearsPendingSwitch() {
+        var s = selector()
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), at: 1.0))
+        XCTAssertEqual(s.update(point: CGPoint(x: 1500, y: 300), at: 1.2), 2)
+        XCTAssertNil(s.update(point: CGPoint(x: 400, y: 300), at: 1.3))
+        XCTAssertEqual(s.update(point: CGPoint(x: 400, y: 300), at: 1.5), 1)
+        XCTAssertNil(s.pendingSwitch)
+    }
+
+    func testHoldRestartsDwellAfterFaceLoss() {
+        var s = selector()
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), at: 1.0))
+        s.hold()
+        XCTAssertNil(s.update(point: CGPoint(x: 1500, y: 300), at: 1.2), "candidate from before the gap must not count")
+        XCTAssertEqual(s.update(point: CGPoint(x: 1500, y: 300), at: 1.4), 2)
     }
 }

@@ -3,10 +3,15 @@ import CryptoKit
 import Foundation
 
 struct CalibrationSample: Codable, Sendable {
+    /// Marks samples taken while the user looks at their keyboard instead of a screen.
+    static let awayDisplayID: CGDirectDisplayID = 0
+
     var features: GazeFeatures
     var point: CGPoint
     var displayID: CGDirectDisplayID
     var weight: Double
+
+    var isAway: Bool { displayID == Self.awayDisplayID }
 }
 
 struct Calibration: Codable, Sendable {
