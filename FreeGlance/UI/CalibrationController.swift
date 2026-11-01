@@ -216,28 +216,15 @@ final class CalibrationController {
         guard let fit, Set(fit.samples.map(\.displayID)) == Set(displays.map(\.id)),
               GazeModel(samples: fit.samples, lambda: fit.lambda, displayLambdas: fit.displayLambdas) != nil
         else { return nil }
-        let largest = displays.compactMap { d in Self.pointsPerMillimetre(d).map { (d, $0) } }
-            .max { a, b in Self.longestSide(a.0) / a.1 < Self.longestSide(b.0) / b.1 }
+        let largest = displays.compactMap { d in d.pointsPerMillimetre.map { (d, $0) } }
+            .max { a, b in a.0.longestSide / a.1 < b.0.longestSide / b.1 }
         return Calibration(samples: fit.samples + keyboardSamples, displays: displays, lambda: fit.lambda,
                            displayLambdas: fit.displayLambdas, noiseRadius: fit.noiseRadius,
                            typicalErrorCm: largest.map { fit.fixationError / $0.1 / 10 })
     }
 
     private static func ballSpeed(on display: DisplayInfo) -> Double {
-        pointsPerMillimetre(display).map { ballSpeedMM * $0 } ?? fallbackSpeed
-    }
-
-    /// Pixels are square, so longest side over longest side holds whether or not the reported
-    /// physical size follows a rotated display.
-    private static func pointsPerMillimetre(_ display: DisplayInfo) -> Double? {
-        let size = CGDisplayScreenSize(display.id)
-        let millimetres = max(size.width, size.height)
-        guard millimetres > 0, longestSide(display) > 0 else { return nil }
-        return Double(longestSide(display) / millimetres)
-    }
-
-    private static func longestSide(_ display: DisplayInfo) -> Double {
-        Double(max(display.frame.width, display.frame.height))
+        display.pointsPerMillimetre.map { ballSpeedMM * $0 } ?? fallbackSpeed
     }
 
     private func pause(_ seconds: TimeInterval) async -> Bool {
@@ -331,5 +318,20 @@ final class CalibrationController {
 
     private func now() -> TimeInterval {
         ProcessInfo.processInfo.systemUptime
+    }
+}
+
+extension DisplayInfo {
+    /// Pixels are square, so longest side over longest side holds whether or not the reported
+    /// physical size follows a rotated display. Nil when the physical size is unknown.
+    var pointsPerMillimetre: Double? {
+        let size = CGDisplayScreenSize(id)
+        let millimetres = max(size.width, size.height)
+        guard millimetres > 0, longestSide > 0 else { return nil }
+        return longestSide / Double(millimetres)
+    }
+
+    var longestSide: Double {
+        Double(max(frame.width, frame.height))
     }
 }

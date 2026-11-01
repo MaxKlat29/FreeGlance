@@ -3,7 +3,8 @@ import Foundation
 
 /// Two stages: a global model over all screen samples (screen selection, away logic, fallback) and,
 /// per display with at least `minimumDisplaySamples` samples, a refinement model trained only on that
-/// display's samples, applied once the facing display is known.
+/// display's samples, applied once the facing display is known. Displays with refine points add a
+/// `ResidualCorrection` on top of the refinement model.
 struct GazeModel: Sendable {
     static let minimumSamples = 6
     static let minimumDisplaySamples = 60
@@ -14,18 +15,33 @@ struct GazeModel: Sendable {
 
     private let full: RidgeRegression
     private let displays: [CGDirectDisplayID: RidgeRegression]
+    private let corrections: [CGDirectDisplayID: ResidualCorrection]
 
-    init?(samples: [CalibrationSample], lambda: Double = GazeModel.regularization,
+    /// `refineSamples` join the regression like `samples` and, grouped by display and target, also
+    /// build each display's residual correction.
+    init?(samples: [CalibrationSample], refineSamples: [CalibrationSample] = [], lambda: Double = GazeModel.regularization,
           displayLambdas: [CGDirectDisplayID: Double] = [:]) {
-        let usable = samples.filter { s in
-            !s.isAway && s.weight > 0 && s.weight.isFinite && s.point.x.isFinite && s.point.y.isFinite
-                && s.features.fullVector.allSatisfy(\.isFinite)
-        }
-        guard usable.count >= Self.minimumSamples, let full = Self.fit(usable, lambda: lambda) else { return nil }
+        let usable = Self.usable(samples), usableRefine = Self.usable(refineSamples)
+        let all = usable + usableRefine
+        guard all.count >= Self.minimumSamples, let full = Self.fit(all, lambda: lambda) else { return nil }
         self.full = full
-        displays = Dictionary(grouping: usable, by: \.displayID).compactMapValues { group in
+        let displays = Dictionary(grouping: all, by: \.displayID).compactMapValues { group -> RidgeRegression? in
             guard group.count >= Self.minimumDisplaySamples else { return nil }
             return Self.fit(group, lambda: displayLambdas[group[0].displayID] ?? Self.displayRegularization)
+        }
+        self.displays = displays
+        corrections = Dictionary(grouping: usableRefine, by: \.displayID).compactMapValues { group in
+            let model = displays[group[0].displayID] ?? full
+            var points: [(target: CGPoint, predictions: [CGPoint])] = []
+            for s in group {
+                let p = model.predict(s.features.fullVector)
+                if let i = points.firstIndex(where: { $0.target == s.point }) {
+                    points[i].predictions.append(p)
+                } else {
+                    points.append((s.point, [p]))
+                }
+            }
+            return ResidualCorrection(points: points)
         }
     }
 
@@ -34,9 +50,18 @@ struct GazeModel: Sendable {
         full.predict(f.fullVector)
     }
 
-    /// Point from `display`'s own model, the global point when that display has none.
+    /// Point from `display`'s own model, the global point when that display has none, plus the
+    /// display's residual correction when it has refine points.
     func refinedPoint(_ f: GazeFeatures, on display: CGDirectDisplayID) -> CGPoint {
-        (displays[display] ?? full).predict(f.fullVector)
+        let p = (displays[display] ?? full).predict(f.fullVector)
+        return corrections[display]?.corrected(p) ?? p
+    }
+
+    private static func usable(_ samples: [CalibrationSample]) -> [CalibrationSample] {
+        samples.filter { s in
+            !s.isAway && s.weight > 0 && s.weight.isFinite && s.point.x.isFinite && s.point.y.isFinite
+                && s.features.fullVector.allSatisfy(\.isFinite)
+        }
     }
 
     private static func fit(_ samples: [CalibrationSample], lambda: Double) -> RidgeRegression? {

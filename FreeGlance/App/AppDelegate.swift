@@ -19,7 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state?.toggleEyeTracker()
         }
         state.start()
-        if CommandLine.arguments.contains("--recalibrate") { state.startCalibration() }
+        if CommandLine.arguments.contains("--recalibrate") {
+            state.startCalibration()
+        } else if CommandLine.arguments.contains("--refine") {
+            state.startRefine()
+        }
     }
 
     @MainActor

@@ -40,6 +40,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(eyeTrackerItem)
 
         menu.addItem(item("Recalibrate…", #selector(recalibrate)))
+        menu.addItem(item("Refine Accuracy…", #selector(refine)))
         menu.addItem(item("Settings…", #selector(showSettings), key: ","))
         menu.addItem(item("Welcome Guide…", #selector(showWelcome)))
         menu.addItem(.separator())
@@ -71,6 +72,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func togglePause() { appState.togglePause() }
     @objc private func toggleEyeTracker() { appState.toggleEyeTracker() }
     @objc private func recalibrate() { appState.startCalibration() }
+    @objc private func refine() { appState.startRefine() }
     @objc private func showSettings() { appState.showSettings() }
     @objc private func showWelcome() { appState.showWelcome() }
     @objc private func quit() { NSApp.terminate(nil) }

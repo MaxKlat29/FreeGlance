@@ -21,6 +21,8 @@ final class AppState: ObservableObject {
     @Published private(set) var keyboardCalibrated = false
     /// Median calibration error on the largest display, nil when unknown.
     @Published private(set) var calibrationErrorCm: Double?
+    /// Refine points stored with the calibration.
+    @Published private(set) var refinedPointCount = 0
     @Published private(set) var cameras: [CameraChoice] = []
     @Published private(set) var needsRecalibration = false
 
@@ -76,6 +78,7 @@ final class AppState: ObservableObject {
     private var lastDriftNotice: TimeInterval = -.infinity
 
     private var calibrationController: CalibrationController?
+    private var refineController: RefineController?
     private var gazeDot: GazeDotOverlay?
     private var settingsWindow: SettingsWindowController?
     private var welcomeWindow: WelcomeWindowController?
@@ -135,7 +138,7 @@ final class AppState: ObservableObject {
     }
 
     func startCalibration() {
-        guard calibrationController == nil else { return }
+        guard calibrationController == nil, refineController == nil else { return }
         guard CameraSource.isAuthorized else {
             showWelcome()
             return
@@ -146,6 +149,34 @@ final class AppState: ObservableObject {
         calibrationController = controller
         controller.start { [weak self] outcome in self?.finishCalibration(outcome) }
         updateCamera()
+    }
+
+    /// Refine mode on top of the current calibration; a full calibration when there is no valid one.
+    func startRefine() {
+        guard calibrationController == nil, refineController == nil else { return }
+        guard CameraSource.isAuthorized else {
+            showWelcome()
+            return
+        }
+        guard let calibration, let model, !needsRecalibration else {
+            startCalibration()
+            return
+        }
+        if isPaused { togglePause() }
+        resetFocusState()
+        let controller = RefineController(calibration: calibration, model: model, clickSamples: clickSamples, displays: displays)
+        refineController = controller
+        controller.start { [weak self] refined in self?.finishRefine(refined) }
+        updateCamera()
+    }
+
+    func clearRefinements() {
+        guard var calibration, !calibration.refineSamples.isEmpty else { return }
+        calibration.refineSamples = []
+        calibration.save()
+        self.calibration = calibration
+        updateCalibratedState()
+        rebuildModel()
     }
 
     func showSettings() {
@@ -175,6 +206,10 @@ final class AppState: ObservableObject {
         }
         if let calibrationController {
             calibrationController.feed(features)
+            return
+        }
+        if let refineController {
+            refineController.feed(features)
             return
         }
         guard cameraRunning, !needsRecalibration, let model else {
@@ -264,10 +299,9 @@ final class AppState: ObservableObject {
             updateCamera()
             return
         }
-        let samples = calibration.samples + clickSamples
-        model = GazeModel(samples: samples, lambda: calibration.lambda, displayLambdas: calibration.displayLambdas ?? [:])
+        model = calibration.model(adding: clickSamples)
         fixationFilter.radius = calibration.noiseRadius
-        awayDetector = AwayDetector(samples: samples)
+        awayDetector = AwayDetector(samples: calibration.samples + clickSamples)
         lastRefit = now
         updateStatus()
         updateCamera()
@@ -300,6 +334,19 @@ final class AppState: ObservableObject {
         rebuildModel()
     }
 
+    private func finishRefine(_ refined: Calibration?) {
+        refineController = nil
+        guard let refined else {
+            updateStatus()
+            updateCamera()
+            return
+        }
+        refined.save()
+        calibration = refined
+        updateCalibratedState()
+        rebuildModel()
+    }
+
     // MARK: Clicks
 
     private func startClickMonitor() {
@@ -320,7 +367,7 @@ final class AppState: ObservableObject {
             updateStatus()
         }
         // A click while looking at the keyboard says nothing about where the eyes point.
-        guard calibrationController == nil, !isPaused, !needsRecalibration, model != nil, !isAway,
+        guard calibrationController == nil, refineController == nil, !isPaused, !needsRecalibration, model != nil, !isAway,
               let calibration, let features = freshFeatures else { return }
 
         if displays.count >= 2, let predicted {
@@ -340,6 +387,7 @@ final class AppState: ObservableObject {
         calibratedDisplayIDs = Set(samples.filter { !$0.isAway }.map(\.displayID))
         keyboardCalibrated = samples.contains(where: \.isAway)
         calibrationErrorCm = calibration?.typicalErrorCm
+        refinedPointCount = calibration?.refinePoints.count ?? 0
     }
 
     private func scheduleRefit() {
@@ -385,7 +433,7 @@ final class AppState: ObservableObject {
     private func updateCamera() {
         guard let camera else { return }
         let authorized = CameraSource.isAuthorized
-        let tracking = calibrationController != nil || (model != nil && !needsRecalibration)
+        let tracking = calibrationController != nil || refineController != nil || (model != nil && !needsRecalibration)
         let shouldRun = authorized && !isPaused && suspensions.isEmpty && tracking
         if shouldRun {
             if cameraRunning, activeCameraID != settings.cameraUniqueID {
@@ -440,6 +488,7 @@ final class AppState: ObservableObject {
 
     private func reloadDisplays() {
         calibrationController?.cancel()
+        refineController?.finish()
         displays = NSScreen.screens.compactMap { screen in
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
             return DisplayInfo(id: number.uint32Value, frame: screen.frame, name: screen.localizedName)

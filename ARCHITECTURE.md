@@ -17,9 +17,9 @@ FreeGlance/
   Tracking/   CameraSource.swift, FaceAnalyzer.swift, IrisLocator.swift, GazeFeatures.swift
   Model/      Calibration.swift, CalibrationFit.swift, PursuitPath.swift, GazeModel.swift, AwayDetector.swift,
               ScreenSelector.swift, Dwell.swift, OneEuroFilter.swift, MedianFilter.swift, FixationFilter.swift,
-              Settings.swift
+              RefineSchedule.swift, ResidualCorrection.swift, Settings.swift
   Focus/      FocusEngine.swift, WindowLocator.swift, AXHelpers.swift, PaneFocuser.swift, InputGuard.swift
-  UI/         MenuBarController.swift, SettingsView.swift, CalibrationController.swift,
+  UI/         MenuBarController.swift, SettingsView.swift, CalibrationController.swift, RefineController.swift,
               WelcomeView.swift, GazeDotOverlay.swift, HotKey.swift
   Resources/  Info.plist, FreeGlance.entitlements
 FreeGlanceTests/  pure-logic tests (Model/)
@@ -32,7 +32,7 @@ camera, selectable) → FaceAnalyzer (Vision `VNDetectFaceLandmarksRequest`: yaw
 contours, face bbox; iris centre from luma pixels via IrisLocator) → `GazeFeatures` → GazeModel
 (fit from calibration) → One Euro filtered point → AwayDetector + ScreenSelector (dwell + threshold
 + hysteresis); the facing display's refinement model point (GazeModel.refinedPoint, global point when that
-display has no model) → MedianFilter (component-wise median of the last 3 frames, kills
+display has no model, plus that display's ResidualCorrection when it has refine points) → MedianFilter (component-wise median of the last 3 frames, kills
 single-frame spikes) → FixationFilter → eye tracker dot and FocusEngine (same-screen window/pane) → AX focus +
 pointer warp. When the facing display changes, MedianFilter and FixationFilter restart so the dot does not
 smear across screens.
@@ -79,8 +79,20 @@ struct Calibration: Codable, Sendable {
     var noiseRadius: Double      // FixationFilter radius in pt (missing in old JSON: 70)
     var typicalErrorCm: Double?  // fixation-level CV error (CalibrationFit.fixationError) at the largest display's
                                  //   pixel density, shown after calibration and in Settings
+    var refineSamples: [CalibrationSample]  // Refine mode frames, labelled with their target (missing in old JSON: [])
     static func load() -> Calibration?; func save()
+    func model(adding extra: [CalibrationSample]) -> GazeModel?  // samples + extra (clicks), refineSamples, stored lambdas
+    func refineWeight(display:frames:) -> Double  // max(1, refineShare (0.05) * screen samples of display / frames)
+    mutating func addRefinePoint(_ target: RefineTarget, frames: [GazeFeatures])  // replaces points on that display within
+                                 //   120 pt, keeps the last 60 points per display
+    var refinePoints: [RefineTarget]  // distinct (display, target), oldest first
 }
+
+// Model/RefineSchedule.swift  5x3 grid per display (8/29/50/71/92 % x, 12/50/88 % y), shuffled by seed (SplitMix64);
+//   first round visits every point once, later rounds by last measured error, largest first
+struct RefineTarget: Sendable, Equatable { var displayID: CGDirectDisplayID; var point: CGPoint }
+struct RefineSchedule: Sendable { init(displays:seed:); let targets: [RefineTarget]; var current: RefineTarget?
+    mutating func complete(error: Double) -> Double? /* round mean when a round ends */; func recentMean(_ count: Int) -> Double? }
 
 // Model/PursuitPath.swift  serpentine through the 6-94 % box, rows joined by semicircles, parametrized by distance
 struct PursuitPath: Sendable { static func serpentine(in frame: CGRect, rows: Int) -> PursuitPath; var length: Double; func point(atDistance:) -> CGPoint }
@@ -94,11 +106,21 @@ struct CalibrationFit: Sendable { init?(traces: [PursuitTrace]); let lag, lambda
 // Model/GazeModel.swift  (ridge regression with quadratic terms, solved in-house, no deps;
 //   RidgeProblem keeps the standardized design + Gram matrix so CV solves many targets/lambdas per fold)
 //   two stages: global model over all screen samples + one model per display with >= 60 samples of its own
+//   refine samples join both regression stages and build one ResidualCorrection per display
 struct GazeModel: Sendable {
-    init?(samples: [CalibrationSample], lambda: Double = 0.03, displayLambdas: [CGDirectDisplayID: Double] = [:])  // nil if too few samples
+    init?(samples: [CalibrationSample], refineSamples: [CalibrationSample] = [], lambda: Double = 0.03,
+          displayLambdas: [CGDirectDisplayID: Double] = [:])  // nil if too few samples
     func predictPoint(_ f: GazeFeatures) -> CGPoint     // global model: screen selection, away rule, fallback; away samples ignored
-    func refinedPoint(_ f: GazeFeatures, on display: CGDirectDisplayID) -> CGPoint  // display model, else global point
+    func refinedPoint(_ f: GazeFeatures, on display: CGDirectDisplayID) -> CGPoint  // display model (else global point)
+                                                        //   + the display's residual correction when it has refine points
 }
+
+// Model/ResidualCorrection.swift  per display, one anchor per refine point (samples sharing display + target):
+//   q = component-wise median of the uncorrected refined predictions of its frames, r = target - q.
+//   correction(p) = sum w_i r_i / (sum w_i + 0.15), w_i = exp(-|p - q_i|^2 / (2 * 260^2)): ~87 % of r at an anchor,
+//   < 10 % at 3 sigma, 0 without anchors. Rebuilt with every model (refine point, load, click refit); nothing stored.
+struct ResidualCorrection: Sendable { init?(anchors:); init?(points: [(target: CGPoint, predictions: [CGPoint])])
+    func offset(at:) -> CGVector; func corrected(_:) -> CGPoint; static func median(_ points: [CGPoint]) -> CGPoint }
 
 // Model/AwayDetector.swift  two-class LDA (keyboard vs screen) on standardized fullVector,
 //   shared covariance + ridge 0.3, weight-aware priors; always false without keyboard samples
@@ -186,9 +208,27 @@ struct InputGuard { static func secondsSinceKey() -> Double; static func seconds
   Recalibration needed when displayLayoutHash changes; the hash includes `Calibration.featureVersion`
   (3 = smooth pursuit with latency compensation), so older calibrations also need recalibration. Calibrations without keyboard samples stay valid
   (geometric rule only); the Calibrate tab shows "Keyboard: Not calibrated".
+- Refine mode (RefineController): needs a valid calibration (else starts a full one); menu "Refine Accuracy…",
+  Calibrate tab "Refine", launch argument `--refine`. Borderless dimmed overlay per display like calibration;
+  focus switching, click learning and the eye tracker dot pause, the camera keeps running. A 22 pt dot shows at
+  `RefineSchedule.current`, the header on its screen reads "Point N · avg error X cm (last 5)". The instruction
+  "Look at the dot and press Space while looking at it. Esc finishes." shows once. Space collects face frames
+  for 0.8 s, dropping the first 0.15 s; fewer than 8 frames shows "Face not found, try again" and keeps the target.
+  Otherwise the median refined point of the frames (before) shows as a hollow ring with a line to the target and
+  its error in cm (display's physical size, 4 pt/mm when unknown); the frames are added with
+  `Calibration.addRefinePoint`, the model is rebuilt off the main thread (`Calibration.model(adding: clicks)`),
+  and the new median corrected point shows as a filled marker "→ X cm" for 0.9 s. The before error feeds the schedule.
+  After a round averaging < 1.5 cm: "Looks good. Esc to finish, Space to continue." Esc keeps every point measured
+  so far: AppState saves the calibration and rebuilds the model. The Calibrate tab shows "Refined points: N" and
+  "Clear refinements". Refine samples go into GazeModel (global and display stage, plus the display's
+  ResidualCorrection), not into AwayDetector or the click weight; a new calibration starts without them. With the
+  0.05 share one round of 15 points (20 frames each) carries 43 % of a display's weight, yet the regression alone
+  only gets about halfway (it cannot tell refine frames from calibration frames); with the residual correction,
+  synthetic data with a constant 200 pt offset and calibration-like refine frames drops from 199 to 16 pt at the
+  refined points.
 - Camera stops on lock / sleep / screensaver, resumes on unlock / wake.
 - Menu: status "Tracking — facing <display>" / "Paused" / "Needs calibration", Pause Tracking ⇧⌘G,
-  Show Eye Tracker ⇧⌘E (checkmark, settings.showGazeDot), Recalibrate…, Settings… ⌘,, Welcome Guide…, Quit FreeGlance ⌘Q. Icon SF Symbol eye / eye.slash.
+  Show Eye Tracker ⇧⌘E (checkmark, settings.showGazeDot), Recalibrate…, Refine Accuracy…, Settings… ⌘,, Welcome Guide…, Quit FreeGlance ⌘Q. Icon SF Symbol eye / eye.slash.
 - Settings window tabs: Screens (live cards per display, highlighted facing one, last window app name),
   Split panes, Calibrate, Settings (all controls + camera picker + launch at login).
 - Welcome guide: 1 camera permission, 2 accessibility permission (open System Settings pane,

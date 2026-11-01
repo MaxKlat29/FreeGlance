@@ -199,6 +199,16 @@ private struct CalibrateTab: View {
                 Button("Calibrate") { appState.startCalibration() }
                     .buttonStyle(.borderedProminent)
             }
+            Section("Refine") {
+                LabeledContent("Refined points", value: "\(appState.refinedPointCount)")
+                Text("Look at a dot and press Space; FreeGlance corrects the model at that spot and shows the error before and after. Repeat until the dot and the prediction line up, Esc finishes.")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Refine") { appState.startRefine() }
+                    Button("Clear refinements") { appState.clearRefinements() }
+                        .disabled(appState.refinedPointCount == 0)
+                }
+            }
         }
         .formStyle(.grouped)
     }
