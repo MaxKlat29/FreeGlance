@@ -1,0 +1,55 @@
+name: FreeGlance
+options:
+  bundleIdPrefix: de.klattig
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: 73U3JUFZS9
+    CODE_SIGN_IDENTITY: "Apple Development"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+targets:
+  FreeGlance:
+    type: application
+    platform: macOS
+    sources: [FreeGlance]
+    info:
+      path: FreeGlance/Resources/Info.plist
+      properties:
+        LSUIElement: true
+        CFBundleDisplayName: FreeGlance
+        CFBundleShortVersionString: "1.0"
+        NSCameraUsageDescription: "FreeGlance uses the camera to tell which screen, window or pane you are facing. Frames are analysed in memory and never saved."
+    entitlements:
+      path: FreeGlance/Resources/FreeGlance.entitlements
+      properties:
+        com.apple.security.device.camera: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.klattig.FreeGlance
+  FreeGlanceTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [FreeGlanceTests]
+    dependencies:
+      - target: FreeGlance
+    settings:
+      base:
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/FreeGlance.app/Contents/MacOS/FreeGlance"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: de.klattig.FreeGlanceTests
+schemes:
+  FreeGlance:
+    build:
+      targets:
+        FreeGlance: all
+        FreeGlanceTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - FreeGlanceTests

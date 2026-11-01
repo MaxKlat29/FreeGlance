@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "project": "FreeGlance",
+  "project_path": "/Users/maximilianklattig/Documents/DEV/FreeGlance",
+  "created": "2026-11-01T12:59:23Z",
+  "updated": "2026-11-01T13:16:27Z",
+  "columns": [
+    {
+      "id": "backlog",
+      "label": "Backlog"
+    },
+    {
+      "id": "in_progress",
+      "label": "In Arbeit"
+    },
+    {
+      "id": "in_review",
+      "label": "In Review"
+    },
+    {
+      "id": "done",
+      "label": "Fertig"
+    }
+  ],
+  "next_id": 2,
+  "tickets": [
+    {
+      "id": "T-001",
+      "title": "FreeGlance: macOS-App, Fokus folgt Blick (Nachbau GlanceSwitch-Funktionsumfang)",
+      "description": "",
+      "column": "in_progress",
+      "assignee": "",
+      "instance": "",
+      "priority": "P2",
+      "tags": [],
+      "session": "",
+      "created": "2026-11-01T12:59:23Z",
+      "updated": "2026-11-01T13:16:27Z",
+      "started_at": "2026-11-01T12:59:25Z",
+      "completed_at": null,
+      "comments": [],
+      "logs": [
+        {
+          "ts": "2026-11-01T12:59:25Z",
+          "agent": "claude",
+          "level": "info",
+          "msg": "moved: backlog → in_progress"
+        },
+        {
+          "ts": "2026-11-01T13:01:05Z",
+          "agent": "claude",
+          "level": "info",
+          "msg": "Spec von glanceswitch.com extrahiert, ARCHITECTURE.md + project.yml angelegt, Build-Workflow wf_ab437919-f3d gestartet (Implement, Integrate, Review, Verify, Fix)"
+        },
+        {
+          "ts": "2026-11-01T13:16:27Z",
+          "agent": "claude",
+          "level": "success",
+          "msg": "Review-Fixes (29 Findings) angewendet: ScreenSelector nearest-candidate, synthetische Klicks gefiltert, Pane-Resolver per Hit-Test geteilt, Kamera-Recovery, Kalibrier-Guards. Build + 24 Tests gruen."
+        }
+      ]
+    }
+  ]
+}
