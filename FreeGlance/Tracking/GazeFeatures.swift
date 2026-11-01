@@ -7,8 +7,9 @@ import Foundation
 /// - `yaw`: degrees, + = user turns their head to their right.
 /// - `pitch`: degrees, + = user tilts their head up.
 /// - `roll`: degrees, + = head tilts towards the user's right shoulder.
-/// - `eyeX`/`eyeY`: pupil position inside the eye contour bounding box, -1...1,
-///   + = looking to the user's right / up, averaged over both eyes.
+/// - `eyeX`/`eyeY`: iris centre (darkest pixels inside the eye contour) relative to the
+///   midpoint of the eye corners, in eye widths, + = looking to the user's right / up,
+///   averaged over both eyes (see `IrisLocator`).
 /// - `faceX`/`faceY`: face bounding box center in the frame, 0...1,
 ///   `faceX` grows as the user moves to their right, `faceY` grows upwards.
 /// - `faceSize`: face bounding box width relative to frame width, 0...1 (distance proxy).

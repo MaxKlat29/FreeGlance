@@ -51,7 +51,10 @@ final class AppState: ObservableObject {
     private var paneDwell: Dwell<PaneKey>
     private var lastPaneKey: PaneKey?
     private var paneKeyCache: (point: CGPoint, time: TimeInterval, key: PaneKey?)?
+    /// Screen selection: One Euro filtered model point.
     private var gazeFilter = OneEuroFilter()
+    /// Eye tracker dot and same-screen targeting: fixation-smoothed on top of `gazeFilter`.
+    private var fixationFilter = FixationFilter()
     /// Screens switch this long after the last keystroke; panes wait for the full typing pause.
     private static let screenTypingBeat: TimeInterval = 0.4
 
@@ -155,6 +158,7 @@ final class AppState: ObservableObject {
         latestFeaturesAt = now
         guard let features else {
             gazeFilter.reset()
+            fixationFilter.reset()
             paneDwell.reset()
             selector.hold()
             syncFacingDisplay()
@@ -174,7 +178,9 @@ final class AppState: ObservableObject {
         let typing = settings.waitWhileTyping && sinceKey < settings.typingPauseSec
         let typingBeat = settings.waitWhileTyping && sinceKey < Self.screenTypingBeat
 
-        let point = gazeFilter.filter(model.predictPoint(features), at: features.timestamp)
+        let raw = model.predictPoint(features)
+        let point = gazeFilter.filter(raw, at: features.timestamp)
+        let fixation = fixationFilter.filter(raw, at: features.timestamp)
         isAway = awayDetector.isAway(features) || selector.isAway(point)
         updateScreen(point: point, at: features.timestamp)
 
@@ -186,20 +192,20 @@ final class AppState: ObservableObject {
 
         if settings.showGazeDot {
             if gazeDot == nil { gazeDot = GazeDotOverlay() }
-            gazeDot?.show(at: point, away: isAway)
+            gazeDot?.show(at: fixation, away: isAway)
         } else {
             gazeDot?.hide()
         }
 
         guard settings.sameScreenFocus, selector.pendingSwitch == nil, mouseIdle, !typing, !isAway,
               let facing = displays.first(where: { $0.id == facingDisplay }),
-              facing.frame.contains(point) else {
+              facing.frame.contains(fixation) else {
             paneDwell = Dwell(duration: paneDelay)
             return
         }
-        if let fired = paneDwell.update(paneKey(at: point), at: features.timestamp), fired != lastPaneKey {
+        if let fired = paneDwell.update(paneKey(at: fixation), at: features.timestamp), fired != lastPaneKey {
             lastPaneKey = fired
-            focusEngine.focus(point: point, onDisplay: facing.id)
+            focusEngine.focus(point: fixation, onDisplay: facing.id)
         }
     }
 

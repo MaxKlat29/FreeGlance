@@ -5,10 +5,15 @@ final class CalibrationController {
     struct Spot: Equatable {
         var point: CGPoint
         var displayID: CGDirectDisplayID
+        /// Head held still, only the eyes follow: decorrelates eye from head features.
+        var eyesOnly = false
     }
 
     private static let moveDuration: TimeInterval = 0.45
     private static let holdDuration: TimeInterval = 1.5
+    private static let eyesOnlyHoldDuration: TimeInterval = 1.2
+    private static let eyesOnlyPrompt = "Face the centre of this screen, then keep your head still and follow the dot with your eyes only."
+    private static let eyesOnlyReadDuration: TimeInterval = 2
     private static let discardDuration: TimeInterval = 0.4
     private static let keyboardPrompt = "Now look at your keyboard the way you do while typing. Hold for 3 seconds."
     private static let keyboardReadDuration: TimeInterval = 1.5
@@ -98,7 +103,16 @@ final class CalibrationController {
             }
         }
 
-        return displays.flatMap { perDisplay[$0.id] ?? [] }
+        return displays.flatMap { perDisplay[$0.id] ?? [] } + displays.flatMap(eyesOnlySpots)
+    }
+
+    /// Centre, then the corners of the 20/80 % box, per display.
+    private static func eyesOnlySpots(for display: DisplayInfo) -> [Spot] {
+        let f = display.frame
+        let fractions: [(CGFloat, CGFloat)] = [(0.5, 0.5), (0.2, 0.8), (0.8, 0.8), (0.8, 0.2), (0.2, 0.2)]
+        return fractions.map { fx, fy in
+            Spot(point: CGPoint(x: f.minX + f.width * fx, y: f.minY + f.height * fy), displayID: display.id, eyesOnly: true)
+        }
     }
 
     private static func edgeSpot(_ a: DisplayInfo, _ b: DisplayInfo, t: CGFloat, onA: Bool) -> Spot? {
@@ -129,12 +143,17 @@ final class CalibrationController {
     private func run() async {
         for (index, spot) in spots.enumerated() {
             heldSpot = nil
+            if spot.eyesOnly, index == 0 || !spots[index - 1].eyesOnly || spots[index - 1].displayID != spot.displayID {
+                for overlay in overlays { overlay.label.stringValue = Self.eyesOnlyPrompt }
+                guard await pause(Self.eyesOnlyReadDuration) else { return }
+            }
             show(spot, index: index)
             guard await pause(Self.moveDuration) else { return }
             collectFrom = now() + Self.discardDuration
             heldSpot = spot
-            shrinkDot(on: spot.displayID)
-            guard await pause(Self.holdDuration) else { return }
+            let hold = spot.eyesOnly ? Self.eyesOnlyHoldDuration : Self.holdDuration
+            shrinkDot(on: spot.displayID, over: hold)
+            guard await pause(hold) else { return }
         }
         heldSpot = nil
         guard await holdKeyboard() else { return }
@@ -199,14 +218,15 @@ final class CalibrationController {
             }
             overlay.dot.transform = CATransform3DIdentity
             CATransaction.commit()
-            overlay.label.stringValue = "Spot \(index + 1) of \(spots.count). Esc cancels."
+            let progress = "Spot \(index + 1) of \(spots.count). Esc cancels."
+            overlay.label.stringValue = spot.eyesOnly ? "\(Self.eyesOnlyPrompt)\n\(progress)" : progress
         }
     }
 
-    private func shrinkDot(on displayID: CGDirectDisplayID) {
+    private func shrinkDot(on displayID: CGDirectDisplayID, over duration: TimeInterval) {
         guard let overlay = overlays.first(where: { $0.displayID == displayID }) else { return }
         CATransaction.begin()
-        CATransaction.setAnimationDuration(Self.holdDuration)
+        CATransaction.setAnimationDuration(duration)
         overlay.dot.transform = CATransform3DMakeScale(0.45, 0.45, 1)
         CATransaction.commit()
     }

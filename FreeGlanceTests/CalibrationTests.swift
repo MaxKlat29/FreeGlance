@@ -38,4 +38,20 @@ final class CalibrationTests: XCTestCase {
         XCTAssertEqual(loaded.displayLayoutHash, calibration.displayLayoutHash)
         XCTAssertTrue(loaded.matches(displays: [b, a]))
     }
+
+    @MainActor
+    func testSpotsEndWithEyesOnlyPassPerDisplay() {
+        let spots = CalibrationController.makeSpots(for: [a, b])
+        let firstEyesOnly = spots.firstIndex(where: \.eyesOnly) ?? spots.count
+        XCTAssertFalse(spots[..<firstEyesOnly].isEmpty)
+        XCTAssertTrue(spots[firstEyesOnly...].allSatisfy(\.eyesOnly), "eyes-only pass runs after the head-and-eyes spots")
+
+        for display in [a, b] {
+            let eyesOnly = spots.filter { $0.eyesOnly && $0.displayID == display.id }
+            XCTAssertEqual(eyesOnly.count, 5)
+            XCTAssertEqual(eyesOnly.first?.point, CGPoint(x: display.frame.midX, y: display.frame.midY))
+            XCTAssertTrue(eyesOnly.allSatisfy { display.frame.contains($0.point) })
+            XCTAssertEqual(Set(eyesOnly.map(\.point.x)).count, 3)
+        }
+    }
 }

@@ -130,7 +130,8 @@ final class CameraSource: NSObject, @unchecked Sendable {
             return
         }
         session.addInput(input)
-        session.sessionPreset = session.canSetSessionPreset(.hd1280x720) ? .hd1280x720 : .high
+        // The iris is only a few pixels wide; 1080p roughly doubles the pixels per eye.
+        session.sessionPreset = [.hd1920x1080, .hd1280x720].first(where: session.canSetSessionPreset) ?? .high
         if !session.outputs.contains(output), session.canAddOutput(output) {
             session.addOutput(output)
         }

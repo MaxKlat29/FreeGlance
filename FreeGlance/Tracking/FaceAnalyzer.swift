@@ -14,6 +14,8 @@ final class FaceAnalyzer: Sendable {
     let smoothing: Double
     private let onFeatures: FeaturesHandler
     private let previous = OSAllocatedUnfairLock<GazeFeatures?>(initialState: nil)
+    /// Last measured iris per eye (left, right) in the current face track.
+    private let lastIris = OSAllocatedUnfairLock<[CGPoint?]>(initialState: [nil, nil])
     private static let smoothingGap: TimeInterval = 0.5
 
     init(smoothing: Double = 0.3, onFeatures: @escaping FeaturesHandler) {
@@ -22,8 +24,8 @@ final class FaceAnalyzer: Sendable {
     }
 
     func analyze(_ pixelBuffer: CVPixelBuffer, timestamp: TimeInterval) {
-        guard let raw = Self.measure(pixelBuffer, timestamp: timestamp) else {
-            previous.withLock { $0 = nil }
+        guard let raw = measure(pixelBuffer, timestamp: timestamp) else {
+            reset()
             onFeatures(nil)
             return
         }
@@ -39,14 +41,15 @@ final class FaceAnalyzer: Sendable {
 
     func reset() {
         previous.withLock { $0 = nil }
+        lastIris.withLock { $0 = [nil, nil] }
     }
 
-    private static func measure(_ pixelBuffer: CVPixelBuffer, timestamp: TimeInterval) -> GazeFeatures? {
+    private func measure(_ pixelBuffer: CVPixelBuffer, timestamp: TimeInterval) -> GazeFeatures? {
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         let rectangles = VNDetectFaceRectanglesRequest()
         rectangles.revision = VNDetectFaceRectanglesRequestRevision3
         guard (try? handler.perform([rectangles])) != nil,
-              let face = rectangles.results?.max(by: { area($0) < area($1) }) else { return nil }
+              let face = rectangles.results?.max(by: { Self.area($0) < Self.area($1) }) else { return nil }
 
         let landmarksRequest = VNDetectFaceLandmarksRequest()
         landmarksRequest.inputFaceObservations = [face]
@@ -54,13 +57,13 @@ final class FaceAnalyzer: Sendable {
         let landmarks = landmarksRequest.results?.first?.landmarks
 
         let box = face.boundingBox
-        let eye = eyeOffset(landmarks) ?? (x: 0, y: 0)
+        let eye = eyeOffset(landmarks, in: pixelBuffer)
         return GazeFeatures(
-            yaw: -degrees(face.yaw),
-            pitch: degrees(face.pitch),
-            roll: -degrees(face.roll),
-            eyeX: eye.x,
-            eyeY: eye.y,
+            yaw: -Self.degrees(face.yaw),
+            pitch: Self.degrees(face.pitch),
+            roll: -Self.degrees(face.roll),
+            eyeX: Double(eye.x),
+            eyeY: Double(eye.y),
             faceX: 1 - Double(box.midX),
             faceY: Double(box.midY),
             faceSize: Double(box.width),
@@ -68,32 +71,66 @@ final class FaceAnalyzer: Sendable {
         )
     }
 
-    /// Pupil offset inside each eye contour's bounding box, mirrored to the user's view, averaged.
-    private static func eyeOffset(_ landmarks: VNFaceLandmarks2D?) -> (x: Double, y: Double)? {
-        guard let landmarks else { return nil }
-        let pairs = [(landmarks.leftEye, landmarks.leftPupil), (landmarks.rightEye, landmarks.rightPupil)]
-        let offsets = pairs.compactMap { contour, pupil -> (x: Double, y: Double)? in
-            guard let contour, let pupil, contour.pointCount > 2, pupil.pointCount > 0 else { return nil }
-            let bounds = boundingBox(contour.normalizedPoints)
-            guard bounds.width > 0, bounds.height > 0 else { return nil }
-            let center = pupil.normalizedPoints[0]
-            let x = (Double(center.x - bounds.midX)) / Double(bounds.width / 2)
-            let y = (Double(center.y - bounds.midY)) / Double(bounds.height / 2)
-            return (x: -clamp(x), y: clamp(y))
+    /// Iris centre in each eye's own frame (see `IrisLocator`), averaged over both eyes.
+    /// An eye without a fresh reading (blink, squint, low contrast) keeps its last iris value for
+    /// the rest of the face track, so the average always spans the same eyes. Vision's pupil
+    /// landmark (same frame) stands in only until a first iris has been measured.
+    private func eyeOffset(_ landmarks: VNFaceLandmarks2D?, in pixelBuffer: CVPixelBuffer) -> CGPoint {
+        guard let landmarks else { return .zero }
+        let eyes = Self.readEyes([(landmarks.leftEye, landmarks.leftPupil), (landmarks.rightEye, landmarks.rightPupil)],
+                                 in: pixelBuffer)
+        return lastIris.withLock { last -> CGPoint in
+            for (index, iris) in eyes.irises.enumerated() where iris != nil {
+                last[index] = iris
+            }
+            return Self.mean(last.compactMap { $0 }) ?? Self.mean(eyes.pupils) ?? .zero
         }
-        guard !offsets.isEmpty else { return nil }
-        let count = Double(offsets.count)
-        return (
-            x: offsets.reduce(0) { $0 + $1.x } / count,
-            y: offsets.reduce(0) { $0 + $1.y } / count
-        )
     }
 
-    private static func boundingBox(_ points: [CGPoint]) -> CGRect {
-        let xs = points.map(\.x)
-        let ys = points.map(\.y)
-        guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { return .null }
-        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    /// Fresh iris reading per eye in input order (nil when closed or not measurable), plus the pupil landmarks.
+    private static func readEyes(
+        _ eyes: [(contour: VNFaceLandmarkRegion2D?, pupil: VNFaceLandmarkRegion2D?)],
+        in pixelBuffer: CVPixelBuffer
+    ) -> (irises: [CGPoint?], pupils: [CGPoint]) {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        let size = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
+        let plane = lumaPlane(of: pixelBuffer)
+
+        var irises = [CGPoint?](repeating: nil, count: eyes.count), pupils: [CGPoint] = []
+        for (index, (contour, pupil)) in eyes.enumerated() {
+            guard let contour, contour.pointCount > 2 else { continue }
+            let points = pixelPoints(contour, imageSize: size)
+            guard let frame = IrisLocator.EyeFrame(contour: points) else { continue }
+            if let pupil, pupil.pointCount > 0, let center = pixelPoints(pupil, imageSize: size).first {
+                pupils.append(clamp(frame.offset(of: center)))
+            }
+            if case .open(let iris) = plane.flatMap({ IrisLocator.locate(contour: points, in: $0) }) {
+                irises[index] = clamp(iris)
+            }
+        }
+        return (irises, pupils)
+    }
+
+    /// Y plane of the full-range 4:2:0 camera format; the caller holds the base address lock.
+    private static func lumaPlane(of pixelBuffer: CVPixelBuffer) -> LumaPlane? {
+        guard CVPixelBufferGetPlaneCount(pixelBuffer) > 0,
+              let base = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return nil }
+        return LumaPlane(base: UnsafePointer(base.assumingMemoryBound(to: UInt8.self)),
+                         width: CVPixelBufferGetWidthOfPlane(pixelBuffer, 0),
+                         height: CVPixelBufferGetHeightOfPlane(pixelBuffer, 0),
+                         bytesPerRow: CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0))
+    }
+
+    /// Landmark points in pixel coordinates with rows top to bottom (Vision's origin is bottom-left).
+    private static func pixelPoints(_ region: VNFaceLandmarkRegion2D, imageSize: CGSize) -> [CGPoint] {
+        region.pointsInImage(imageSize: imageSize).map { CGPoint(x: $0.x, y: imageSize.height - $0.y) }
+    }
+
+    private static func mean(_ points: [CGPoint]) -> CGPoint? {
+        guard !points.isEmpty else { return nil }
+        let count = CGFloat(points.count)
+        return CGPoint(x: points.reduce(0) { $0 + $1.x } / count, y: points.reduce(0) { $0 + $1.y } / count)
     }
 
     private static func blend(_ old: GazeFeatures, _ new: GazeFeatures, weight w: Double) -> GazeFeatures {
@@ -119,7 +156,7 @@ final class FaceAnalyzer: Sendable {
         (radians?.doubleValue ?? 0) * 180 / .pi
     }
 
-    private static func clamp(_ value: Double) -> Double {
-        min(max(value, -1), 1)
+    private static func clamp(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: min(max(p.x, -1), 1), y: min(max(p.y, -1), 1))
     }
 }

@@ -5,6 +5,7 @@ import AppKit
 @MainActor
 final class GazeDotOverlay {
     private static let diameter: CGFloat = 22
+    private static let moveDuration: TimeInterval = 0.08
 
     private enum Style { case tracking, away, paused }
 
@@ -45,15 +46,24 @@ final class GazeDotOverlay {
         }
         for (index, entry) in entries.enumerated() {
             let inside = index == target
+            let glide = inside && !entry.dot.isHidden && entry.window.isVisible
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             entry.dot.isHidden = !inside
             if inside {
-                entry.dot.position = CGPoint(x: position.x - entry.frame.minX, y: position.y - entry.frame.minY)
                 Self.apply(style == .paused && lastAway ? .away : style, to: entry.dot)
                 entry.dot.opacity = style == .paused ? 0.35 : 1
             }
             CATransaction.commit()
+            if inside {
+                // A visible dot glides to the next point instead of teleporting.
+                CATransaction.begin()
+                CATransaction.setDisableActions(!glide)
+                CATransaction.setAnimationDuration(Self.moveDuration)
+                CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+                entry.dot.position = CGPoint(x: position.x - entry.frame.minX, y: position.y - entry.frame.minY)
+                CATransaction.commit()
+            }
             if inside, !entry.window.isVisible { entry.window.orderFrontRegardless() }
         }
     }

@@ -60,8 +60,8 @@ xcodebuild -project FreeGlance.xcodeproj -scheme FreeGlance test
 
 1. Allow camera access.
 2. Allow Accessibility. FreeGlance needs it to raise windows and move the pointer.
-3. Calibrate. Follow the dot across every screen with your head and eyes, then look at your
-   keyboard for 3 seconds.
+3. Calibrate. Follow the dot across every screen with your head and eyes, then once more with
+   your eyes only while you face each screen and keep your head still, then look at your keyboard for 3 seconds.
 4. Work as usual.
 
 Recalibrate from the menu bar any time, or launch with `--recalibrate`.
@@ -69,9 +69,11 @@ Recalibrate from the menu bar any time, or launch with `--recalibrate`.
 ## How it works
 
 ```
-Camera (30 fps) → Vision face landmarks → head pose + pupil features
-  → ridge regression (calibrated) → One Euro filter → gaze point
-  → screen selector (threshold, hysteresis, adaptive dwell) + keyboard/away classifier
+Camera (up to 1080p, 30 fps) → Vision face landmarks → head pose + iris position
+  (darkest pixels inside each eye contour, relative to the eye corners)
+  → ridge regression (calibrated) → gaze point
+  → fixation filter (calm while you look at one spot, jumps on a saccade) → eye tracker + pane focus
+  → One Euro filter → screen selector (threshold, hysteresis, adaptive dwell) + keyboard/away classifier
   → Accessibility focus (window raise, pane AXFocused, safe click fallback) + pointer warp
 ```
 

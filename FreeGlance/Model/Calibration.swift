@@ -16,6 +16,8 @@ struct CalibrationSample: Codable, Sendable {
 
 struct Calibration: Codable, Sendable {
     static let defaultsKey = "calibration"
+    /// Bumped when `GazeFeatures` semantics change; older calibrations then need recalibration.
+    static let featureVersion = 2
 
     var samples: [CalibrationSample]
     var displayLayoutHash: String
@@ -26,7 +28,7 @@ struct Calibration: Codable, Sendable {
     }
 
     static func currentLayoutHash(displays: [DisplayInfo]) -> String {
-        let layout = displays
+        let layout = "v\(featureVersion)|" + displays
             .sorted { $0.id < $1.id }
             .map { d in
                 let f = d.frame.standardized

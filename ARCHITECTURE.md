@@ -14,8 +14,9 @@ Everything on-device, frames never stored, no network.
 project.yml                 xcodegen spec (app target FreeGlance, test target FreeGlanceTests)
 FreeGlance/
   App/        FreeGlanceApp.swift, AppDelegate.swift, AppState.swift
-  Tracking/   CameraSource.swift, FaceAnalyzer.swift, GazeFeatures.swift
-  Model/      Calibration.swift, GazeModel.swift, AwayDetector.swift, ScreenSelector.swift, Dwell.swift, Settings.swift
+  Tracking/   CameraSource.swift, FaceAnalyzer.swift, IrisLocator.swift, GazeFeatures.swift
+  Model/      Calibration.swift, GazeModel.swift, AwayDetector.swift, ScreenSelector.swift, Dwell.swift,
+              OneEuroFilter.swift, FixationFilter.swift, Settings.swift
   Focus/      FocusEngine.swift, WindowLocator.swift, AXHelpers.swift, PaneFocuser.swift, InputGuard.swift
   UI/         MenuBarController.swift, SettingsView.swift, CalibrationController.swift,
               WelcomeView.swift, GazeDotOverlay.swift, HotKey.swift
@@ -25,11 +26,27 @@ FreeGlanceTests/  pure-logic tests (Model/)
 
 ## Data flow
 
-CameraSource (AVCapture, 1280x720, max 30 fps, prefers external camera, selectable)
-→ FaceAnalyzer (Vision `VNDetectFaceLandmarksRequest`: yaw, pitch, roll, pupils, eye contours,
-face bbox) → `GazeFeatures` → GazeModel (fit from calibration) → One Euro filtered point
-→ AwayDetector + ScreenSelector (full model point, dwell + threshold + hysteresis) and
-FocusEngine (same-screen window/pane via predicted point) → AX focus + pointer warp.
+CameraSource (AVCapture, 1920x1080 when supported else 1280x720, max 30 fps, prefers external
+camera, selectable) → FaceAnalyzer (Vision `VNDetectFaceLandmarksRequest`: yaw, pitch, roll, eye
+contours, face bbox; iris centre from luma pixels via IrisLocator) → `GazeFeatures` → GazeModel
+(fit from calibration) → One Euro filtered point → AwayDetector + ScreenSelector (dwell + threshold
++ hysteresis); the unfiltered model point → FixationFilter → eye tracker dot and FocusEngine (same-screen
+window/pane) → AX focus + pointer warp.
+
+Eye features (IrisLocator): per eye, the Vision eye contour in pixel coordinates spans an eye frame
+(origin = midpoint of the two contour points farthest apart, unit = their distance). Inside the
+contour polygon, pixels of the Y plane up to the 30th percentile of the masked luma form the iris;
+their darkness-weighted centroid (weight = threshold - luma + 1) in the eye frame is `eyeX`/`eyeY`,
+averaged over both eyes. Eye opening (contour height / width) < 0.12 is a blink. An eye without a fresh
+reading (blink, squint, no measurable iris) keeps its last iris value until the face is lost, so the
+average always spans the same eyes; Vision's pupil landmark (same frame) stands in only until a first
+iris has been measured. Vision's pupil landmark alone
+follows the contour and barely moves with the eyes (residual correlation after head features:
+eyeX 0.42, eyeY -0.02 on real data), hence the pixel-based iris.
+
+FixationFilter (eye tracker dot, pane/window targeting): within 70 pt of the current fixation the
+output is an exponentially weighted mean (250 ms); two consecutive frames that agree outside the
+radius start a new fixation at once (saccade); a single stray frame is ignored.
 
 ## Contracts (shared types; implement exactly these names)
 
@@ -39,7 +56,7 @@ struct GazeFeatures: Codable, Sendable, Equatable {
     var yaw: Double          // degrees, + = user turns to their right (screen-left mirrored handled here)
     var pitch: Double        // degrees, + = up
     var roll: Double
-    var eyeX: Double         // pupil offset inside eye contour, -1...1, averaged both eyes
+    var eyeX: Double         // iris centre relative to eye-corner midpoint, in eye widths, averaged both eyes
     var eyeY: Double
     var faceX: Double        // face bbox center in frame, 0...1
     var faceY: Double
@@ -119,9 +136,13 @@ struct InputGuard { static func secondsSinceKey() -> Double; static func seconds
   post UserNotification "FreeGlance accuracy dropped" naming the display, suggest recalibration.
 - Calibration: fullscreen overlay per display, Space to start, dot through 9 spots (3x3 at 10/50/90 %)
   plus 3 extra spots along each shared edge, ~1.5 s per spot, discard first 0.4 s, Esc cancels.
+  Then an eyes-only pass ("Face the centre of this screen, then keep your head still and follow the dot with
+  your eyes only.", shown again before each display): per display centre plus the corners of the 20/80 % box, ~1.2 s per spot, discard first 0.4 s, ordinary samples;
+  it decorrelates eye from head features, which co-move in the first pass.
   Then keyboard pose on every screen: 1.5 s to read, 3 s countdown, discard first 0.5 s, samples with
   awayDisplayID (excluded from GazeModel, calibrated displays and completeness check).
-  Recalibration needed when displayLayoutHash changes. Calibrations without keyboard samples stay valid
+  Recalibration needed when displayLayoutHash changes; the hash includes `Calibration.featureVersion`
+  (2 = pixel-based iris), so calibrations with older eye features also need recalibration. Calibrations without keyboard samples stay valid
   (geometric rule only); the Calibrate tab shows "Keyboard: Not calibrated".
 - Camera stops on lock / sleep / screensaver, resumes on unlock / wake.
 - Menu: status "Tracking — facing <display>" / "Paused" / "Needs calibration", Pause Tracking ⇧⌘G,
@@ -130,6 +151,6 @@ struct InputGuard { static func secondsSinceKey() -> Double; static func seconds
   Split panes, Calibrate, Settings (all controls + camera picker + launch at login).
 - Welcome guide: 1 camera permission, 2 accessibility permission (open System Settings pane,
   poll AXIsProcessTrusted), 3 calibrate, 4 done.
-- Eye tracker (gaze dot): click-through borderless overlay, all spaces, never key, 22 pt, shows the filtered
-  predicted point. Accent while tracking, grey while away (pinned to the nearest screen edge), dimmed when paused.
+- Eye tracker (gaze dot): click-through borderless overlay, all spaces, never key, 22 pt, shows the
+  fixation-filtered point and glides to it (80 ms ease-out) instead of jumping. Accent while tracking, grey while away (pinned to the nearest screen edge), dimmed when paused.
 - Global hotkeys ⇧⌘G (pause) and ⇧⌘E (eye tracker) via Carbon RegisterEventHotKey (no permission needed).
