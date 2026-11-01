@@ -19,7 +19,7 @@ struct CameraDevice: Identifiable, Sendable, Hashable {
 final class CameraSource: NSObject, @unchecked Sendable {
     typealias FrameHandler = @Sendable (CVPixelBuffer, TimeInterval) -> Void
 
-    static let maxFrameRate: Double = 15
+    static let maxFrameRate: Double = 30
 
     private let onFrame: FrameHandler
     private let session = AVCaptureSession()

@@ -25,7 +25,7 @@ FreeGlanceTests/  pure-logic tests (Model/)
 
 ## Data flow
 
-CameraSource (AVCapture, 1280x720, max 15 fps, prefers external camera, selectable)
+CameraSource (AVCapture, 1280x720, max 30 fps, prefers external camera, selectable)
 → FaceAnalyzer (Vision `VNDetectFaceLandmarksRequest`: yaw, pitch, roll, pupils, eye contours,
 face bbox) → `GazeFeatures` → GazeModel (fit from calibration) → `GazeEstimate`
 → ScreenSelector (head pose only, dwell + threshold + hysteresis) and
@@ -78,7 +78,7 @@ struct ScreenSelector {
 struct Dwell<Key: Hashable> { init(duration: TimeInterval); mutating func update(_ key: Key?, at t: TimeInterval) -> Key? }
 
 // Model/Settings.swift   @MainActor final class Settings: ObservableObject, UserDefaults-backed
-//   switchDelayMs = 300, headTurnPercent = 50, sameScreenFocus = true, paneDelayMs = 300,
+//   switchDelayMs = 150, headTurnPercent = 50, sameScreenFocus = true, paneDelayMs = 200,
 //   waitWhileTyping = true, typingPauseSec = 2.0, showGazeDot = false, clickFallback = true,
 //   learnFromClicks = true, cameraUniqueID: String? (nil = auto), launchAtLogin = true
 
@@ -101,10 +101,10 @@ struct InputGuard { static func secondsSinceKey() -> Double; static func seconds
 
 ## Behaviour rules (from the reference product)
 
-- Screen switch: head pose only, dwell 300 ms, hysteresis so bezel glances don't ping-pong,
+- Screen switch: head pose only (linear model, One Euro filtered), dwell 150 ms, hysteresis so bezel glances don't ping-pong,
   poses far from every screen ignored. Needs >= 2 displays, else only same-screen focus.
 - Never move focus or pointer while mouse/trackpad used and 1.5 s after.
-- Wait while typing: panes never switch while typing; screens switch only after typingPause.
+- Wait while typing: panes never switch while typing; screens switch 0.4 s after the last key.
 - Clicks teach the model (learnFromClicks): sample = current features + click point, weight 0.3,
   ring buffer of 300, refit throttled. Click positions not kept beyond the buffer.
 - Drift: if > 40 % of last 20 clicks land on a different display than the one predicted,

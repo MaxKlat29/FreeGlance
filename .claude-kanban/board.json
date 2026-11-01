@@ -3,7 +3,7 @@
   "project": "FreeGlance",
   "project_path": "/Users/maximilianklattig/Documents/DEV/FreeGlance",
   "created": "2026-11-01T12:59:23Z",
-  "updated": "2026-11-01T13:16:27Z",
+  "updated": "2026-11-01T13:17:32Z",
   "columns": [
     {
       "id": "backlog",
@@ -32,10 +32,12 @@
       "assignee": "",
       "instance": "",
       "priority": "P2",
-      "tags": [],
+      "tags": [
+        "max-pending"
+      ],
       "session": "",
       "created": "2026-11-01T12:59:23Z",
-      "updated": "2026-11-01T13:16:27Z",
+      "updated": "2026-11-01T13:17:32Z",
       "started_at": "2026-11-01T12:59:25Z",
       "completed_at": null,
       "comments": [],
@@ -57,6 +59,12 @@
           "agent": "claude",
           "level": "success",
           "msg": "Review-Fixes (29 Findings) angewendet: ScreenSelector nearest-candidate, synthetische Klicks gefiltert, Pane-Resolver per Hit-Test geteilt, Kamera-Recovery, Kalibrier-Guards. Build + 24 Tests gruen."
+        },
+        {
+          "ts": "2026-11-01T13:17:32Z",
+          "agent": "claude",
+          "level": "success",
+          "msg": "Build+24 Tests gruen, Commit e6f7244, installiert nach /Applications, laeuft. Wartet auf Max: Kamera/Bedienungshilfen freigeben, kalibrieren, Praxistest"
         }
       ]
     }

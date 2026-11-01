@@ -49,6 +49,10 @@ final class AppState: ObservableObject {
     private var paneDwell: Dwell<PaneKey>
     private var lastPaneKey: PaneKey?
     private var paneKeyCache: (point: CGPoint, time: TimeInterval, key: PaneKey?)?
+    private var headFilter = OneEuroFilter()
+    private var gazeFilter = OneEuroFilter()
+    /// Screens switch this long after the last keystroke; panes wait for the full typing pause.
+    private static let screenTypingBeat: TimeInterval = 0.4
 
     private var latestFeatures: GazeFeatures?
     private var latestFeaturesAt: TimeInterval = 0
@@ -81,7 +85,7 @@ final class AppState: ObservableObject {
     }
 
     func start() {
-        let analyzer = FaceAnalyzer { [weak self] features in
+        let analyzer = FaceAnalyzer(smoothing: 0) { [weak self] features in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.handle(features) } }
         }
         camera = CameraSource { buffer, timestamp in analyzer.analyze(buffer, timestamp: timestamp) }
@@ -144,6 +148,8 @@ final class AppState: ObservableObject {
         latestFeatures = features
         latestFeaturesAt = now
         guard let features else {
+            headFilter.reset()
+            gazeFilter.reset()
             paneDwell.reset()
             return
         }
@@ -157,18 +163,20 @@ final class AppState: ObservableObject {
         }
 
         let mouseIdle = InputGuard.secondsSinceMouse() >= InputGuard.mouseLockout
-        let typing = settings.waitWhileTyping && InputGuard.secondsSinceKey() < settings.typingPauseSec
+        let sinceKey = InputGuard.secondsSinceKey()
+        let typing = settings.waitWhileTyping && sinceKey < settings.typingPauseSec
+        let typingBeat = settings.waitWhileTyping && sinceKey < Self.screenTypingBeat
 
         updateScreen(model: model, features: features)
 
-        if let pending = pendingDisplay, mouseIdle, !typing {
+        if let pending = pendingDisplay, mouseIdle, !typingBeat {
             pendingDisplay = nil
             focusEngine.focus(display: pending)
             lastPaneKey = nil
             paneDwell = Dwell(duration: paneDelay)
         }
 
-        let point = model.predictPoint(features)
+        let point = gazeFilter.filter(model.predictPoint(features), at: features.timestamp)
         if settings.showGazeDot {
             if gazeDot == nil { gazeDot = GazeDotOverlay() }
             gazeDot?.show(at: point)
@@ -191,7 +199,7 @@ final class AppState: ObservableObject {
     private func updateScreen(model: GazeModel, features: GazeFeatures) {
         guard displays.count >= 2 else { return }
         let hadCurrent = selector.current != nil
-        if let fired = selector.update(headPoint: model.headPoint(features), at: features.timestamp), hadCurrent {
+        if let fired = selector.update(headPoint: headFilter.filter(model.headPoint(features), at: features.timestamp), at: features.timestamp), hadCurrent {
             pendingDisplay = fired
         }
         if facingDisplay != selector.current {
@@ -202,7 +210,7 @@ final class AppState: ObservableObject {
 
     private func paneKey(at point: CGPoint) -> PaneKey? {
         let t = now
-        if let cache = paneKeyCache, hypot(cache.point.x - point.x, cache.point.y - point.y) < 48, t - cache.time < 0.5 {
+        if let cache = paneKeyCache, hypot(cache.point.x - point.x, cache.point.y - point.y) < 24, t - cache.time < 0.15 {
             return cache.key
         }
         let key = PaneKey.at(point)

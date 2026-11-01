@@ -3,7 +3,10 @@ import Foundation
 
 struct GazeModel: Sendable {
     static let minimumSamples = 6
-    static let regularization = 1e-3
+    // Measured on real calibration data (leave-one-spot-out): head pose overfits with quadratic
+    // terms, the full model needs stronger regularization to keep its tail error down.
+    static let headRegularization = 1e-3
+    static let fullRegularization = 0.03
 
     private let full: RidgeRegression
     private let head: RidgeRegression
@@ -18,9 +21,9 @@ struct GazeModel: Sendable {
         let weights = usable.map(\.weight)
         guard
             let full = RidgeRegression(inputs: usable.map(\.features.fullVector), targets: targets,
-                                       weights: weights, lambda: Self.regularization),
+                                       weights: weights, lambda: Self.fullRegularization, quadratic: true),
             let head = RidgeRegression(inputs: usable.map(\.features.headVector), targets: targets,
-                                       weights: weights, lambda: Self.regularization)
+                                       weights: weights, lambda: Self.headRegularization, quadratic: false)
         else { return nil }
         self.full = full
         self.head = head
@@ -44,8 +47,10 @@ struct RidgeRegression: Sendable {
     private let coefficientsY: [Double]
     private let interceptX: Double
     private let interceptY: Double
+    private let quadratic: Bool
 
-    init?(inputs: [[Double]], targets: [CGPoint], weights: [Double], lambda: Double) {
+    init?(inputs: [[Double]], targets: [CGPoint], weights: [Double], lambda: Double, quadratic: Bool) {
+        self.quadratic = quadratic
         guard let width = inputs.first?.count, width > 0,
               inputs.count == targets.count, inputs.count == weights.count,
               inputs.allSatisfy({ $0.count == width })
@@ -54,7 +59,7 @@ struct RidgeRegression: Sendable {
         guard totalWeight > 0 else { return nil }
 
         let input = Self.standardization(of: inputs, weights: weights, total: totalWeight)
-        let expanded = inputs.map { Self.expand(Self.apply($0, mean: input.mean, scale: input.scale)) }
+        let expanded = inputs.map { Self.expand(Self.apply($0, mean: input.mean, scale: input.scale), quadratic: quadratic) }
         let feature = Self.standardization(of: expanded, weights: weights, total: totalWeight)
         let design = expanded.map { Self.apply($0, mean: feature.mean, scale: feature.scale) }
 
@@ -96,7 +101,7 @@ struct RidgeRegression: Sendable {
     }
 
     func predict(_ input: [Double]) -> CGPoint {
-        let row = Self.apply(Self.expand(Self.apply(input, mean: inputMean, scale: inputScale)),
+        let row = Self.apply(Self.expand(Self.apply(input, mean: inputMean, scale: inputScale), quadratic: quadratic),
                              mean: featureMean, scale: featureScale)
         var x = interceptX
         var y = interceptY
@@ -107,7 +112,8 @@ struct RidgeRegression: Sendable {
         return CGPoint(x: x, y: y)
     }
 
-    private static func expand(_ z: [Double]) -> [Double] {
+    private static func expand(_ z: [Double], quadratic: Bool) -> [Double] {
+        guard quadratic else { return z }
         var out = z
         out.reserveCapacity(z.count + z.count * (z.count + 1) / 2)
         for i in z.indices {

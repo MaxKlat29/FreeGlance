@@ -34,10 +34,10 @@ final class Settings: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         defaults.register(defaults: [
-            Key.switchDelayMs: 300,
+            Key.switchDelayMs: 150,
             Key.headTurnPercent: 50,
             Key.sameScreenFocus: true,
-            Key.paneDelayMs: 300,
+            Key.paneDelayMs: 200,
             Key.waitWhileTyping: true,
             Key.typingPauseSec: 2.0,
             Key.showGazeDot: false,
