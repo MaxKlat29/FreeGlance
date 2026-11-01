@@ -62,7 +62,7 @@ xcodebuild -project FreeGlance.xcodeproj -scheme FreeGlance test
 2. Allow Accessibility. FreeGlance needs it to raise windows and move the pointer.
 3. Calibrate. On every screen a ball slowly travels across the whole display. Follow it with your
    head and eyes, then once more with your eyes only while you face the screen and keep your head still.
-   Finally look at your keyboard for 3 seconds. FreeGlance then shows the typical error it measured.
+   Finally look at your keyboard for 3 seconds. FreeGlance then shows the typical error it measured while you fixate a point.
 4. Work as usual.
 
 Recalibrate from the menu bar any time, or launch with `--recalibrate`.
@@ -72,9 +72,10 @@ Recalibrate from the menu bar any time, or launch with `--recalibrate`.
 ```
 Camera (up to 1080p, 30 fps) → Vision face landmarks → head pose + iris position
   (darkest pixels inside each eye contour, relative to the eye corners)
-  → ridge regression (calibrated on smooth pursuit, eye latency and regularization cross-validated) → gaze point
-  → 3-frame median + fixation filter (calm while you look at one spot, jumps on a saccade) → eye tracker + pane focus
-  → One Euro filter → screen selector (threshold, hysteresis, adaptive dwell) + keyboard/away classifier
+  → ridge regression (calibrated on smooth pursuit, eye latency and regularization cross-validated) → global gaze point
+  → global point, One Euro filter → screen selector (threshold, hysteresis, adaptive dwell) + keyboard/away classifier
+  → per-display refinement model of the screen you face → 3-frame median + fixation filter
+    (calm while you look at one spot, jumps on a saccade) → eye tracker + pane focus
   → Accessibility focus (window raise, pane AXFocused, safe click fallback) + pointer warp
 ```
 

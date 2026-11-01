@@ -31,9 +31,11 @@ CameraSource (AVCapture, 1920x1080 when supported else 1280x720, max 30 fps, pre
 camera, selectable) → FaceAnalyzer (Vision `VNDetectFaceLandmarksRequest`: yaw, pitch, roll, eye
 contours, face bbox; iris centre from luma pixels via IrisLocator) → `GazeFeatures` → GazeModel
 (fit from calibration) → One Euro filtered point → AwayDetector + ScreenSelector (dwell + threshold
-+ hysteresis); the unfiltered model point → MedianFilter (component-wise median of the last 3 frames, kills
++ hysteresis); the facing display's refinement model point (GazeModel.refinedPoint, global point when that
+display has no model) → MedianFilter (component-wise median of the last 3 frames, kills
 single-frame spikes) → FixationFilter → eye tracker dot and FocusEngine (same-screen window/pane) → AX focus +
-pointer warp.
+pointer warp. When the facing display changes, MedianFilter and FixationFilter restart so the dot does not
+smear across screens.
 
 Eye features (IrisLocator): per eye, the Vision eye contour in pixel coordinates spans an eye frame
 (origin = midpoint of the two contour points farthest apart, unit = their distance). Inside the
@@ -73,8 +75,10 @@ struct CalibrationSample: Codable, Sendable { static let awayDisplayID: CGDirect
 struct Calibration: Codable, Sendable {
     var samples: [CalibrationSample]; var displayLayoutHash: String
     var lambda: Double           // cross-validated ridge strength, used for click refits too (missing in old JSON: 0.03)
+    var displayLambdas: [CGDirectDisplayID: Double]?  // per-display refinement ridge strength (nil in old JSON: 0.01 each)
     var noiseRadius: Double      // FixationFilter radius in pt (missing in old JSON: 70)
-    var typicalErrorCm: Double?  // median CV error on the largest display, shown after calibration and in Settings
+    var typicalErrorCm: Double?  // fixation-level CV error (CalibrationFit.fixationError) at the largest display's
+                                 //   pixel density, shown after calibration and in Settings
     static func load() -> Calibration?; func save()
 }
 
@@ -83,13 +87,17 @@ struct PursuitPath: Sendable { static func serpentine(in frame: CGRect, rows: In
 // Model/CalibrationFit.swift
 struct PursuitTrace: Sendable { var displayID; var path: PursuitPath; var speed: Double /* pt/s */; var start: TimeInterval
     var frames: [GazeFeatures]; func target(at t: TimeInterval) -> CGPoint; mutating func record(_ f: GazeFeatures) /* drops first 0.6 s */ }
-struct CalibrationFit: Sendable { init?(traces: [PursuitTrace]); let lag, lambda, medianError, noiseRadius: Double; let samples: [CalibrationSample] }
+struct CalibrationFit: Sendable { init?(traces: [PursuitTrace]); let lag, lambda, fixationError, noiseRadius: Double
+    let displayLambdas: [CGDirectDisplayID: Double]; let samples: [CalibrationSample]
+    static func fixationError(predictions:targets:times:traces:) -> Double }  // median error of predictions averaged over a centred 0.5 s window
 
 // Model/GazeModel.swift  (ridge regression with quadratic terms, solved in-house, no deps;
 //   RidgeProblem keeps the standardized design + Gram matrix so CV solves many targets/lambdas per fold)
+//   two stages: global model over all screen samples + one model per display with >= 60 samples of its own
 struct GazeModel: Sendable {
-    init?(samples: [CalibrationSample], lambda: Double = 0.03)   // nil if too few samples
-    func predictPoint(_ f: GazeFeatures) -> CGPoint     // full vector -> global point; away samples ignored
+    init?(samples: [CalibrationSample], lambda: Double = 0.03, displayLambdas: [CGDirectDisplayID: Double] = [:])  // nil if too few samples
+    func predictPoint(_ f: GazeFeatures) -> CGPoint     // global model: screen selection, away rule, fallback; away samples ignored
+    func refinedPoint(_ f: GazeFeatures, on display: CGDirectDisplayID) -> CGPoint  // display model, else global point
 }
 
 // Model/AwayDetector.swift  two-class LDA (keyboard vs screen) on standardized fullVector,
@@ -146,7 +154,8 @@ struct InputGuard { static func secondsSinceKey() -> Double; static func seconds
   reset pending dwell, undo a fired switch focus has not applied yet (typing, mouse), no screen or pane focus, no click learning or drift tracking.
 - Never move focus or pointer while mouse/trackpad used and 1.5 s after.
 - Wait while typing: panes never switch while typing; screens switch 0.4 s after the last key.
-- Clicks teach the model (learnFromClicks): sample = current features + click point, ring buffer of 300,
+- Clicks teach the model (learnFromClicks): sample = current features + click point (global model and the clicked
+  display's model), ring buffer of 300,
   weighted so a full buffer carries 20 % of the total weight (scaled to the calibration's pursuit frame count),
   refit throttled with the calibration's lambda. Click positions not kept beyond the buffer.
 - Drift: if > 40 % of last 20 clicks land on a different display than the one predicted,
@@ -163,9 +172,14 @@ struct InputGuard { static func secondsSinceKey() -> Double; static func seconds
   awayDisplayID (excluded from GazeModel, calibrated displays and completeness check).
   CalibrationFit (off the main thread): for lag in 0...200 ms (40 ms steps) frames at t are paired with the
   ball at t - lag; for lambda in 0.003...0.3 a 5-fold CV over contiguous 1 s blocks (round-robin to folds, no
-  frame-level leakage) scores the quadratic ridge; the (lag, lambda) with the lowest median euclidean error wins.
-  noiseRadius = 75th percentile of the per-frame CV error, clamped 40...160 pt. The overlay then shows
-  "Calibration done — typical error ≈ X cm" (median CV error on the physically largest display) for 3 s
+  frame-level leakage) scores the global quadratic ridge; the (lag, lambda) with the lowest median euclidean error wins. At that lag each
+  display with >= 60 frames picks its refinement lambda from 0.003, 0.01, 0.03 by the same folds restricted to it
+  (one Gram matrix per fold and display). Errors come from the two-stage held-out predictions (display model, global
+  where a fold has too few display frames): noiseRadius = 75th percentile of the per-frame error, clamped 40...160 pt;
+  the typical error is fixation-level, the median error of predictions averaged over a centred 0.5 s window within a
+  pass. On real data (2118 frames, two displays): per frame 184 pt global, 166 pt two-stage, 127 pt (4.0 cm) fixation-level.
+  The overlay then shows "Calibration done — typical error ≈ X cm while fixating" (at the physically largest display's
+  pixel density) for 3 s
   (Esc there only closes it early, the result is kept); the Calibrate tab shows it too. Esc during the fit
   cancels the fit task. Fails (status "Calibration failed — try again") without a fit or with a
   display that has no samples.

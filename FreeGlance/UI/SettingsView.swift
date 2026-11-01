@@ -192,7 +192,7 @@ private struct CalibrateTab: View {
             }
             Section {
                 if let error = appState.calibrationErrorCm, !appState.needsRecalibration {
-                    LabeledContent("Typical error", value: String(format: "≈ %.1f cm", error))
+                    LabeledContent("Typical error", value: String(format: "≈ %.1f cm while fixating", error))
                 }
                 Text("Follow a slowly moving ball across each screen, once with head and eyes and once with your eyes only, then look at your keyboard. Takes about half a minute per display.")
                     .foregroundStyle(.secondary)

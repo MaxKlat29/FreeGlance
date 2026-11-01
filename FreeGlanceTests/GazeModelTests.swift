@@ -120,4 +120,53 @@ final class GazeModelTests: XCTestCase {
         let mean = shifts.reduce(0, +) / Double(shifts.count)
         XCTAssertEqual(mean, 0.2 * offset, accuracy: 0.05 * offset)
     }
+
+    /// Display 2 sits right of display 1 and is seen with a stronger eye gain; one quadratic model
+    /// cannot fit both mappings, a model per display can.
+    private func displayTruth(_ f: GazeFeatures, display: CGDirectDisplayID) -> CGPoint {
+        display == 1
+            ? CGPoint(x: 800 + 25 * f.yaw + 300 * f.eyeX, y: 500 + 30 * f.pitch + 200 * f.eyeY)
+            : CGPoint(x: 2600 + 40 * f.yaw - 0.04 * pow(f.yaw, 3) + 900 * f.eyeX * f.eyeX * f.eyeX,
+                      y: 300 - 20 * f.pitch + 600 * f.eyeY * abs(f.eyeY))
+    }
+
+    private func displaySamples(_ rng: inout LCG, display: CGDirectDisplayID, count: Int) -> [CalibrationSample] {
+        (0..<count).map { _ in
+            var f = features(&rng)
+            f.yaw = display == 1 ? rng.next(in: -30...0) : rng.next(in: 0...30)
+            return CalibrationSample(features: f, point: displayTruth(f, display: display), displayID: display, weight: 1)
+        }
+    }
+
+    func testRefinedPointBeatsGlobalModelOnEachDisplay() throws {
+        var rng = LCG(state: 21)
+        let samples = displaySamples(&rng, display: 1, count: 300) + displaySamples(&rng, display: 2, count: 300)
+        let model = try XCTUnwrap(GazeModel(samples: samples))
+        for display: CGDirectDisplayID in [1, 2] {
+            let test = displaySamples(&rng, display: display, count: 100)
+            func median(_ predict: (GazeFeatures) -> CGPoint) -> Double {
+                test.map { s in
+                    let p = predict(s.features)
+                    return hypot(Double(p.x - s.point.x), Double(p.y - s.point.y))
+                }.sorted()[test.count / 2]
+            }
+            let global = median(model.predictPoint)
+            let refined = median { model.refinedPoint($0, on: display) }
+            XCTAssertLessThan(refined, 0.5 * global, "display \(display)")
+        }
+    }
+
+    func testRefinedPointFallsBackToGlobalWithoutEnoughDisplaySamples() throws {
+        var rng = LCG(state: 9)
+        let samples = displaySamples(&rng, display: 1, count: 200)
+            + displaySamples(&rng, display: 2, count: GazeModel.minimumDisplaySamples - 1)
+        let model = try XCTUnwrap(GazeModel(samples: samples))
+        for _ in 0..<10 {
+            let f = features(&rng)
+            XCTAssertEqual(model.refinedPoint(f, on: 2), model.predictPoint(f))
+            XCTAssertEqual(model.refinedPoint(f, on: 3), model.predictPoint(f))
+        }
+        let f = features(&rng)
+        XCTAssertNotEqual(model.refinedPoint(f, on: 1), model.predictPoint(f))
+    }
 }

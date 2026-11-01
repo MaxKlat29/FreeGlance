@@ -26,16 +26,21 @@ struct Calibration: Codable, Sendable {
     var displayLayoutHash: String
     /// Ridge strength chosen by cross-validation; also used when clicks refit the model.
     var lambda: Double
+    /// Ridge strength of each display's refinement model, chosen by cross-validation; nil in calibrations
+    /// that predate it (`GazeModel.displayRegularization` then).
+    var displayLambdas: [CGDirectDisplayID: Double]?
     /// Typical per-frame model error in points, the fixation filter's radius.
     var noiseRadius: Double
-    /// Median cross-validated error on the largest display, nil when its physical size is unknown.
+    /// Median cross-validated error while fixating (predictions averaged over 0.5 s), in centimetres at the
+    /// physically largest display's pixel density; nil when its physical size is unknown.
     var typicalErrorCm: Double?
 
     init(samples: [CalibrationSample], displays: [DisplayInfo], lambda: Double = GazeModel.regularization,
-         noiseRadius: Double = Calibration.defaultNoiseRadius, typicalErrorCm: Double? = nil) {
+         displayLambdas: [CGDirectDisplayID: Double]? = nil, noiseRadius: Double = Calibration.defaultNoiseRadius, typicalErrorCm: Double? = nil) {
         self.samples = samples
         self.displayLayoutHash = Self.currentLayoutHash(displays: displays)
         self.lambda = lambda
+        self.displayLambdas = displayLambdas
         self.noiseRadius = noiseRadius
         self.typicalErrorCm = typicalErrorCm
     }
@@ -45,6 +50,7 @@ struct Calibration: Codable, Sendable {
         samples = try c.decode([CalibrationSample].self, forKey: .samples)
         displayLayoutHash = try c.decode(String.self, forKey: .displayLayoutHash)
         lambda = try c.decodeIfPresent(Double.self, forKey: .lambda) ?? GazeModel.regularization
+        displayLambdas = try c.decodeIfPresent([CGDirectDisplayID: Double].self, forKey: .displayLambdas)
         noiseRadius = try c.decodeIfPresent(Double.self, forKey: .noiseRadius) ?? Self.defaultNoiseRadius
         typicalErrorCm = try c.decodeIfPresent(Double.self, forKey: .typicalErrorCm)
     }

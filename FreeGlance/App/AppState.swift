@@ -55,12 +55,14 @@ final class AppState: ObservableObject {
     private var paneDwell: Dwell<PaneKey>
     private var lastPaneKey: PaneKey?
     private var paneKeyCache: (point: CGPoint, time: TimeInterval, key: PaneKey?)?
-    /// Screen selection: One Euro filtered model point.
+    /// Screen selection: One Euro filtered global model point.
     private var gazeFilter = OneEuroFilter()
-    /// Eye tracker dot and same-screen targeting: median of three raw model points (no single-frame
-    /// spikes), then fixation-smoothed with the calibration's measured noise radius.
+    /// Eye tracker dot and same-screen targeting: median of three points of the facing display's model
+    /// (no single-frame spikes), then fixation-smoothed with the calibration's measured noise radius.
     private var spikeFilter = MedianFilter()
     private var fixationFilter = FixationFilter()
+    /// Display whose model fed the spike and fixation filters; they restart when it changes.
+    private var refinedDisplay: CGDirectDisplayID?
     /// Screens switch this long after the last keystroke; panes wait for the full typing pause.
     private static let screenTypingBeat: TimeInterval = 0.4
 
@@ -187,9 +189,16 @@ final class AppState: ObservableObject {
 
         let raw = model.predictPoint(features)
         let point = gazeFilter.filter(raw, at: features.timestamp)
-        let fixation = fixationFilter.filter(spikeFilter.filter(raw, at: features.timestamp), at: features.timestamp)
         isAway = awayDetector.isAway(features) || selector.isAway(point)
         updateScreen(point: point, at: features.timestamp)
+
+        if facingDisplay != refinedDisplay {
+            refinedDisplay = facingDisplay
+            spikeFilter.reset()
+            fixationFilter.reset()
+        }
+        let refined = facingDisplay.map { model.refinedPoint(features, on: $0) } ?? raw
+        let fixation = fixationFilter.filter(spikeFilter.filter(refined, at: features.timestamp), at: features.timestamp)
 
         if mouseIdle, !typingBeat, let pending = selector.takePendingSwitch() {
             focusEngine.focus(display: pending)
@@ -256,7 +265,7 @@ final class AppState: ObservableObject {
             return
         }
         let samples = calibration.samples + clickSamples
-        model = GazeModel(samples: samples, lambda: calibration.lambda)
+        model = GazeModel(samples: samples, lambda: calibration.lambda, displayLambdas: calibration.displayLambdas ?? [:])
         fixationFilter.radius = calibration.noiseRadius
         awayDetector = AwayDetector(samples: samples)
         lastRefit = now

@@ -43,9 +43,11 @@ final class CalibrationTests: XCTestCase {
         let f = GazeFeatures(yaw: 1, pitch: 2, roll: 3, eyeX: 0.1, eyeY: -0.2, faceX: 0.5, faceY: 0.4,
                              faceSize: 0.2, timestamp: 10)
         let calibration = Calibration(samples: [CalibrationSample(features: f, point: CGPoint(x: 5, y: 6), displayID: 1, weight: 1)],
-                                      displays: [a], lambda: 0.1, noiseRadius: 55, typicalErrorCm: 1.4)
+                                      displays: [a], lambda: 0.1, displayLambdas: [1: 0.003, 2: 0.03],
+                                      noiseRadius: 55, typicalErrorCm: 1.4)
         let loaded = try JSONDecoder().decode(Calibration.self, from: JSONEncoder().encode(calibration))
         XCTAssertEqual(loaded.lambda, 0.1)
+        XCTAssertEqual(loaded.displayLambdas, [1: 0.003, 2: 0.03])
         XCTAssertEqual(loaded.noiseRadius, 55)
         XCTAssertEqual(loaded.typicalErrorCm, 1.4)
         XCTAssertTrue(loaded.matches(displays: [a]))
@@ -61,5 +63,6 @@ final class CalibrationTests: XCTestCase {
         XCTAssertEqual(loaded.lambda, GazeModel.regularization)
         XCTAssertEqual(loaded.noiseRadius, Calibration.defaultNoiseRadius)
         XCTAssertNil(loaded.typicalErrorCm)
+        XCTAssertNil(loaded.displayLambdas)
     }
 }

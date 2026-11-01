@@ -44,7 +44,9 @@ final class CalibrationFitTests: XCTestCase {
     func testRecoversEyeLatency() throws {
         let fit = try XCTUnwrap(CalibrationFit(traces: traces(lag: 0.12, noise: 1, seed: 11)))
         XCTAssertEqual(fit.lag, 0.12, accuracy: 1e-9)
-        XCTAssertLessThan(fit.medianError, 12)
+        XCTAssertLessThan(fit.fixationError, 12)
+        XCTAssertEqual(Set(fit.displayLambdas.keys), [1])
+        XCTAssertTrue(CalibrationFit.displayLambdas.contains(try XCTUnwrap(fit.displayLambdas[1])))
         XCTAssertEqual(fit.noiseRadius, CalibrationFit.noiseRadiusRange.lowerBound)
         XCTAssertEqual(fit.samples.count, traces(lag: 0.12, noise: 1, seed: 11).map(\.frames.count).reduce(0, +))
     }
@@ -56,6 +58,18 @@ final class CalibrationFitTests: XCTestCase {
         XCTAssertLessThanOrEqual(clean.lambda, 0.01)
         XCTAssertGreaterThan(noisy.lambda, clean.lambda)
         XCTAssertGreaterThan(noisy.noiseRadius, clean.noiseRadius)
+    }
+
+    /// Window ±0.25 s within a trace. One trace: means 3, 3, 4.5, 7.5, 12 -> median 4.5.
+    /// Split after the third frame: means 3, 3, 3, 9, 12 -> median 3.
+    func testFixationErrorAveragesCentredWindowWithinTrace() {
+        let predictions = [0.0, 3, 6, 9, 12].map { CGPoint(x: $0, y: 0) }
+        let targets = [CGPoint](repeating: .zero, count: 5)
+        let times: [TimeInterval] = [0, 0.125, 0.25, 0.5, 1]
+        XCTAssertEqual(CalibrationFit.fixationError(predictions: predictions, targets: targets, times: times,
+                                                    traces: [0, 0, 0, 0, 0]), 4.5, accuracy: 1e-12)
+        XCTAssertEqual(CalibrationFit.fixationError(predictions: predictions, targets: targets, times: times,
+                                                    traces: [0, 0, 0, 1, 1]), 3, accuracy: 1e-12)
     }
 
     func testNilWithoutFrames() {

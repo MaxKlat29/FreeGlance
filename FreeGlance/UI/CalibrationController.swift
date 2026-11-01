@@ -2,7 +2,7 @@ import AppKit
 
 /// Smooth-pursuit calibration: per display a ball slowly traverses the whole screen, once followed
 /// with head and eyes, once with the eyes only. Every face frame is recorded against the ball's
-/// trajectory; `CalibrationFit` then picks eye latency and ridge strength. A keyboard pose ends it.
+/// trajectory; `CalibrationFit` then picks eye latency and ridge strengths. A keyboard pose ends it.
 @MainActor
 final class CalibrationController {
     enum Outcome {
@@ -128,8 +128,8 @@ final class CalibrationController {
         let calibration = makeCalibration(fit)
         if let calibration {
             let error = calibration.typicalErrorCm.map { String(format: "%.1f cm", $0) }
-                ?? String(format: "%.0f pt", fit?.medianError ?? 0)
-            setLabels("Calibration done — typical error ≈ \(error)")
+                ?? String(format: "%.0f pt", fit?.fixationError ?? 0)
+            setLabels("Calibration done — typical error ≈ \(error) while fixating")
         } else {
             setLabels("Calibration failed — the camera saw too little of your face. Try again.")
         }
@@ -214,12 +214,13 @@ final class CalibrationController {
     private func makeCalibration(_ fit: CalibrationFit?) -> Calibration? {
         let displays = overlays.map(\.display)
         guard let fit, Set(fit.samples.map(\.displayID)) == Set(displays.map(\.id)),
-              GazeModel(samples: fit.samples, lambda: fit.lambda) != nil
+              GazeModel(samples: fit.samples, lambda: fit.lambda, displayLambdas: fit.displayLambdas) != nil
         else { return nil }
         let largest = displays.compactMap { d in Self.pointsPerMillimetre(d).map { (d, $0) } }
             .max { a, b in Self.longestSide(a.0) / a.1 < Self.longestSide(b.0) / b.1 }
         return Calibration(samples: fit.samples + keyboardSamples, displays: displays, lambda: fit.lambda,
-                           noiseRadius: fit.noiseRadius, typicalErrorCm: largest.map { fit.medianError / $0.1 / 10 })
+                           displayLambdas: fit.displayLambdas, noiseRadius: fit.noiseRadius,
+                           typicalErrorCm: largest.map { fit.fixationError / $0.1 / 10 })
     }
 
     private static func ballSpeed(on display: DisplayInfo) -> Double {

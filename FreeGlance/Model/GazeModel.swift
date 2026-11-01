@@ -1,27 +1,47 @@
 import CoreGraphics
 import Foundation
 
+/// Two stages: a global model over all screen samples (screen selection, away logic, fallback) and,
+/// per display with at least `minimumDisplaySamples` samples, a refinement model trained only on that
+/// display's samples, applied once the facing display is known.
 struct GazeModel: Sendable {
     static let minimumSamples = 6
+    static let minimumDisplaySamples = 60
     /// Ridge strength for calibrations from before `CalibrationFit` chose it by cross-validation.
     static let regularization = 0.03
+    /// Display model ridge strength for calibrations from before it was cross-validated per display.
+    static let displayRegularization = 0.01
 
     private let full: RidgeRegression
+    private let displays: [CGDirectDisplayID: RidgeRegression]
 
-    init?(samples: [CalibrationSample], lambda: Double = GazeModel.regularization) {
+    init?(samples: [CalibrationSample], lambda: Double = GazeModel.regularization,
+          displayLambdas: [CGDirectDisplayID: Double] = [:]) {
         let usable = samples.filter { s in
             !s.isAway && s.weight > 0 && s.weight.isFinite && s.point.x.isFinite && s.point.y.isFinite
                 && s.features.fullVector.allSatisfy(\.isFinite)
         }
-        guard usable.count >= Self.minimumSamples,
-              let full = RidgeRegression(inputs: usable.map(\.features.fullVector), targets: usable.map(\.point),
-                                         weights: usable.map(\.weight), lambda: lambda, quadratic: true)
-        else { return nil }
+        guard usable.count >= Self.minimumSamples, let full = Self.fit(usable, lambda: lambda) else { return nil }
         self.full = full
+        displays = Dictionary(grouping: usable, by: \.displayID).compactMapValues { group in
+            guard group.count >= Self.minimumDisplaySamples else { return nil }
+            return Self.fit(group, lambda: displayLambdas[group[0].displayID] ?? Self.displayRegularization)
+        }
     }
 
+    /// Global point, used for screen selection and the away logic.
     func predictPoint(_ f: GazeFeatures) -> CGPoint {
         full.predict(f.fullVector)
+    }
+
+    /// Point from `display`'s own model, the global point when that display has none.
+    func refinedPoint(_ f: GazeFeatures, on display: CGDirectDisplayID) -> CGPoint {
+        (displays[display] ?? full).predict(f.fullVector)
+    }
+
+    private static func fit(_ samples: [CalibrationSample], lambda: Double) -> RidgeRegression? {
+        RidgeRegression(inputs: samples.map(\.features.fullVector), targets: samples.map(\.point),
+                        weights: samples.map(\.weight), lambda: lambda, quadratic: true)
     }
 }
 
